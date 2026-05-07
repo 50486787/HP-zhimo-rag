@@ -1,7 +1,6 @@
 """测试：自动化下载模型 + 第一张预览图（同名保存）"""
 import json
 import os
-import time
 import requests
 from playwright.sync_api import sync_playwright
 from config import SITE_BASE, DOWNLOAD_DIR
