@@ -105,7 +105,7 @@ def api_ok(data):
 
 
 def get_enterprise_info(session):
-    """获取企业账号信息，返回 enterpriseId 和 memberLevel。"""
+    """获取企业账号信息，返回 enterpriseId、memberLevel 和 nickName。"""
     resp = session.get(ACCOUNT_INFO_API, headers={"Referer": SITE_BASE + "/"})
     resp.raise_for_status()
     data = resp.json()
