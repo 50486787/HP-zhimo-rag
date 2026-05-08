@@ -1,13 +1,13 @@
 """知末下载器 —— 全量/增量模式下载模型文件和预览图"""
 import os
 import re
-import sys
+import random
 import time
 import json
 import argparse
 import requests
 from datetime import datetime, timedelta
-from urllib.parse import urlparse, unquote
+from playwright.sync_api import sync_playwright
 
 from config import (
     API_BASE, SITE_BASE, DOWNLOAD_DIR, DB_PATH,
@@ -24,9 +24,6 @@ from db import (
 ACCOUNT_INFO_API = f"{API_BASE}/enterprise/accountInfo"
 CONSUMER_LIST_API = f"{API_BASE}/enterprise/consumerList"
 CHILD_CONSUMER_LIST_API = f"{API_BASE}/enterprise/childConsumerList"
-DOWNLOAD_QUALIFY_API = f"{API_BASE}/download/qualify"
-DOWNLOAD_FILE_URL_API = f"{API_BASE}/download/fileUrl"
-
 # === commodityType 映射 ===
 COMMODITY_TYPE_MAP = {
     0: "3d", 3: "3d", 4: "su", 5: "sgt",
@@ -150,97 +147,154 @@ def fetch_records_page(session, api_url, enterprise_id, page, page_size=10):
     return result.get("list", []), result.get("totalCount", 0)
 
 
-def get_download_url(session, sku_id):
-    """通过 qualify → fileUrl 获取 CDN 下载链接。"""
-    # 第一步：检查下载权限
-    qualify_resp = session.get(
-        DOWNLOAD_QUALIFY_API,
-        params={"skuId": sku_id},
-        headers={"Referer": SITE_BASE + "/"},
-    )
-    qualify_resp.raise_for_status()
-    qualify_data = qualify_resp.json()
-    if not api_ok(qualify_data):
-        raise Exception(f"qualify failed: {qualify_data}")
+def download_one_model(context, model_id, commodity_type):
+    """用 Playwright 打开模型详情页，点击下载按钮，捕获 CDN URL 和预览图 URL。
 
-    # 第二步：获取 CDN 文件 URL (POST)
-    file_resp = session.post(
-        DOWNLOAD_FILE_URL_API,
-        params={"skuId": sku_id},
-        headers={
-            "Referer": SITE_BASE + "/",
-            "Content-Type": "application/json",
-        },
-    )
-    file_resp.raise_for_status()
-    file_data = file_resp.json()
-
-    if not api_ok(file_data):
-        raise Exception(f"fileUrl failed: {file_data}")
-
-    url = file_data.get("data", {}).get("url") or file_data.get("data")
-    if isinstance(url, dict):
-        url = url.get("url", "")
-    if not url or not isinstance(url, str):
-        raise Exception(f"unexpected fileUrl response: {file_data}")
-    return url
-
-
-def get_preview_url(session, sku_id, commodity_type):
-    """从模型详情页提取预览图 URL。"""
+    返回 (download_url, suggested_filename, preview_url)。
+    """
     type_name = commodity_type_name(commodity_type)
     template = MODEL_PAGE_TEMPLATES.get(type_name)
     if not template:
-        return ""
+        raise Exception(f"不支持的 commodityType: {commodity_type}")
 
-    page_url = template.format(skuid=sku_id)
+    page_url = template.format(skuid=model_id)
+    page = context.new_page()
+
+    download_url = None
+    download_filename = None
+
+    def on_download(download):
+        nonlocal download_url, download_filename
+        download_url = download.url
+        download_filename = download.suggested_filename
+
+    page.on("download", on_download)
+
     try:
-        resp = session.get(page_url, headers={"User-Agent": random_ua()}, timeout=30)
-        resp.raise_for_status()
-    except Exception:
-        return ""
+        page.goto(page_url, wait_until="domcontentloaded", timeout=60000)
+        # 等待 React 水合完成
+        try:
+            page.wait_for_selector("#__NEXT_DATA__", timeout=8000)
+        except Exception:
+            page.wait_for_timeout(1500)
 
-    html = resp.text
+        # 从 __NEXT_DATA__ 提取第一张预览图 URL
+        preview_url = page.evaluate("""() => {
+            const nd = document.getElementById('__NEXT_DATA__');
+            if (nd) {
+                try {
+                    const data = JSON.parse(nd.textContent);
+                    const pp = data?.props?.pageProps;
+                    const imgArr = pp?.imgArr || [];
+                    if (imgArr.length > 0) return imgArr[0];
+                    const mainUrl = pp?.activeSkuInfo?.mainImageUrl;
+                    if (mainUrl) return mainUrl;
+                    // 贴图类: 尝试 detailImageArr / largeImgArr
+                    const detailArr = pp?.detailImageArr || pp?.largeImgArr || [];
+                    if (detailArr.length > 0) return detailArr[0];
+                } catch (e) {}
+            }
+            return null;
+        }""")
+        if preview_url:
+            preview_url = preview_url.split("?x-oss-process")[0]
 
-    # 尝试 og:image
-    og_match = re.search(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"', html, re.I)
-    if og_match:
-        return og_match.group(1)
+        # 点击下载按钮
+        clicked = False
 
-    # 尝试 znzmoimg CDN 图片
-    img_match = re.search(r'https?://[^"\s]*znzmoimg\.com/[^"\s<>]+\.(?:jpe?g|png|webp)', html, re.I)
-    if img_match:
-        return img_match.group(0)
-
-    # 尝试其他大图
-    img_match = re.search(r'https?://[^"\s]*cdn[^"\s<>]*\.(?:jpe?g|png)[^"\s<>]*', html, re.I)
-    if img_match:
-        return img_match.group(0)
-
-    return ""
-
-
-def extract_filename_from_url(url):
-    """从 CDN URL 的 response-content-disposition 参数中提取文件名。"""
-    if "response-content-disposition" in url:
-        match = re.search(r'filename\*=UTF-8[^"\s]*?([^"&\s]+?)(?:&|$)', url)
-        if not match:
-            match = re.search(r'filename[^=]*=([^"&\s]+)', url)
-        if match:
-            name = match.group(1)
+        # 第一轮：精确文本匹配
+        button_texts = [
+            "企业免费下载", "VIP免费下载", "免费下载", "下载模型",
+            "下载", "下载贴图", "下载素材", "下载图片", "免费下载贴图",
+            "免费下载素材", "立即下载", "下载协议", "同意并下载",
+        ]
+        for text in button_texts:
             try:
-                name = unquote(name)
+                el = page.locator(f":text-is('{text}')").first
+                if el.count() > 0:
+                    el.click(timeout=5000)
+                    clicked = True
+                    break
             except Exception:
-                pass
-            return sanitize_filename(name)
+                continue
 
-    # 从 URL 路径提取
-    path = urlparse(url).path
-    name = os.path.basename(path)
-    if name:
-        name = re.sub(r'\?.*', '', name)
-        return sanitize_filename(name)
-    return ""
+        # 第二轮：模糊文本匹配（包含关键词即可）
+        if not clicked:
+            for kw in ["下载", "download"]:
+                try:
+                    el = page.locator(f"[class*={kw} i], [id*={kw} i]").first
+                    if el.count() > 0:
+                        el.click(timeout=3000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+        # 第三轮：CSS 选择器
+        if not clicked:
+            for sel in [
+                "[class*=vipFreeDownload]", "[class*=downloadBtn]",
+                "[class*=vipFree]", "[class*=freeDownload]",
+                "[class*=downloadWrap]",  # 贴图页 detail__downloadWrap
+                "[class*=btnBox]",         # 按钮容器兜底
+                "a[class*=download]", "button[class*=download]",
+                ".download-btn", "#download-btn",
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if el.count() > 0:
+                        el.click(timeout=3000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+        # 第四轮：遍历页面上所有按钮，找包含"下载"文字的那个
+        if not clicked:
+            buttons = page.locator("button, a, [role=button]").all()
+            for btn in buttons:
+                try:
+                    text = btn.inner_text()
+                    if text and ("下载" in text or "download" in text.lower()):
+                        btn.click(timeout=3000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+        if not clicked:
+            raise Exception(
+                f"未找到下载按钮 (type={commodity_type}/{type_name}, url={page_url})")
+
+        # 等待下载事件，如果超时则尝试处理弹窗（如"下载协议"确认弹窗）
+        for _ in range(20):
+            if download_url:
+                break
+            page.wait_for_timeout(500)
+
+        if not download_url:
+            # 可能弹出了协议确认弹窗，尝试点击"同意"/"确认"
+            for agree_text in ["同意", "确定", "同意并下载", "同意下载", "确认下载",
+                                "Agree", "OK", "Confirm"]:
+                try:
+                    el = page.locator(f":text-is('{agree_text}')").first
+                    if el.count() > 0 and el.is_visible():
+                        el.click(timeout=3000)
+                        break
+                except Exception:
+                    continue
+            # 再等下载事件
+            for _ in range(60):
+                if download_url:
+                    break
+                page.wait_for_timeout(500)
+
+        if not download_url:
+            raise Exception("未捕获到 CDN 下载 URL")
+
+        return download_url, download_filename, preview_url
+    finally:
+        page.close()
 
 
 def download_file(session, url, dest_path, timeout=300):
@@ -266,7 +320,7 @@ def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
-def run(mode, target_month=None):
+def run(mode, target_month=None, force=False, days=30):
     """主入口。"""
     init_db(DB_PATH)
     cookies_json = get_cookies(DB_PATH)
@@ -275,6 +329,15 @@ def run(mode, target_month=None):
         return
 
     session = build_session(cookies_json)
+
+    # 启动 Playwright 浏览器（用于触发下载，获取 CDN URL）
+    cookies = json.loads(cookies_json)
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=False, args=[
+        "--window-position=-32000,-32000",  # 窗口移到屏幕外，不弹窗
+    ])
+    pw_context = browser.new_context()
+    pw_context.add_cookies(cookies)
 
     # 获取企业信息
     print("获取企业信息...")
@@ -285,19 +348,25 @@ def run(mode, target_month=None):
         print(f"  enterpriseId: {enterprise_id}, memberLevel: {member_level}")
     except Exception as e:
         print(f"获取企业信息失败: {e}")
+        pw_context.close()
+        browser.close()
+        playwright.stop()
         return
 
     api_url = get_consumer_list_api(member_level)
 
     # 断点恢复
+    ...
     if mode == "full":
         cp = get_checkpoint(DB_PATH)
         start_page = cp["current_page"] if cp and cp["mode"] == "full" else 1
         print(f"全量模式: 从第 {start_page} 页开始")
     else:
         start_page = 1
-        cutoff_time = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-        target = target_month or "最近30天"
+        cutoff_time = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        target = target_month or f"最近{days}天"
+        if force:
+            target += " (强制重新下载)"
         print(f"增量模式: {target}")
 
     consecutive_429 = 0
@@ -334,6 +403,9 @@ def run(mode, target_month=None):
             if consecutive_429 >= MAX_CONSECUTIVE_429:
                 print(f"连续 {MAX_CONSECUTIVE_429} 次 429，停止。")
                 save_checkpoint(DB_PATH, mode, page, total_pages)
+                pw_context.close()
+                browser.close()
+                playwright.stop()
                 return
             delay = RATE_LIMIT_BACKOFF * consecutive_429
             print(f"429 限流，等待 {delay}s...")
@@ -354,9 +426,9 @@ def run(mode, target_month=None):
         if mode == "incremental":
             filtered = [r for r in records if r.get("createTime", "") >= cutoff_time]
             if len(filtered) < len(records):
-                print(f"第 {page} 页: {len(records)} 条中 {len(filtered)} 条在 30 天内")
+                print(f"第 {page} 页: {len(records)} 条中 {len(filtered)} 条在 {days} 天内")
             if not filtered:
-                print("已到达 30 天边界，结束。")
+                print(f"已到达 {days} 天边界，结束。")
                 break
             records = filtered
 
@@ -368,30 +440,34 @@ def run(mode, target_month=None):
             commodity_type = record["commodity_type"]
             is_img = is_image_type(commodity_type)
 
-            # 去重
-            existing = get_download_record(DB_PATH, model_id)
-            if existing and existing["status"] == "done":
-                print(f"  [{model_id}] 已下载，跳过")
-                continue
+            # 去重（--force 时跳过此检查）
+            if not force:
+                existing = get_download_record(DB_PATH, model_id)
+                if existing and existing["status"] == "done":
+                    print(f"  [{model_id}] 已下载，跳过")
+                    continue
 
             insert_download_record(DB_PATH, record)
 
             month = record["month"] or (target_month if target_month else "unknown")
-            month_dir = os.path.join(DOWNLOAD_DIR, month)
+            type_name = commodity_type_name(commodity_type)
+            if type_name == "su":
+                month_dir = os.path.join(DOWNLOAD_DIR, month)
+            else:
+                month_dir = os.path.join(DOWNLOAD_DIR, month, type_name)
             ensure_dir(month_dir)
 
-            # 获取下载链接
+            # 用 Playwright 浏览器触发下载，捕获 CDN URL
             try:
-                cdn_url = get_download_url(session, model_id)
+                cdn_url, cdn_filename, preview_url = download_one_model(
+                    pw_context, model_id, commodity_type)
             except Exception as e:
                 print(f"  [{model_id}] 获取下载链接失败: {e}")
                 update_download_status(DB_PATH, model_id, "failed", error_msg=str(e))
                 continue
 
-            # 从 CDN URL 提取文件名和扩展名
-            cdn_filename = extract_filename_from_url(cdn_url)
+            # 从 CDN 文件名确定扩展名和基础名
             if cdn_filename:
-                # 使用 CDN 返回的文件名
                 name_no_ext, ext = os.path.splitext(cdn_filename)
                 if not ext:
                     ext = ".zip"
@@ -409,7 +485,7 @@ def run(mode, target_month=None):
                 file_path = os.path.join(month_dir, f"{model_name_part}_{model_id}{ext}")
                 preview_path = os.path.join(month_dir, f"{model_name_part}_{model_id}.jpg")
 
-            # 随机延迟后下载
+            # 随机延迟后下载模型文件
             delay = random_delay()
             print(f"  [{model_id}] 下载 {model_name_part}{ext} (等待 {delay:.1f}s)...")
             time.sleep(delay)
@@ -424,13 +500,11 @@ def run(mode, target_month=None):
                 continue
 
             # 非贴图类型：下载预览图
-            if not is_img:
+            if not is_img and preview_url:
                 try:
-                    preview_url = get_preview_url(session, model_id, commodity_type)
-                    if preview_url:
-                        time.sleep(random.uniform(2, 5))
-                        download_file(session, preview_url, preview_path, timeout=60)
-                        print(f"  [{model_id}] 预览图已保存")
+                    time.sleep(random.uniform(2, 5))
+                    download_file(session, preview_url, preview_path, timeout=60)
+                    print(f"  [{model_id}] 预览图已保存")
                 except Exception as e:
                     print(f"  [{model_id}] 预览图下载失败: {e}")
                     preview_path = None
@@ -456,6 +530,9 @@ def run(mode, target_month=None):
             print(f"已到达最后一页 (第 {total_pages} 页)，结束。")
             break
 
+    pw_context.close()
+    browser.close()
+    playwright.stop()
     print(f"下载完成。最后页码: {highest_page_seen}")
 
 
@@ -464,5 +541,9 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["full", "incremental"], default="incremental",
                         help="全量模式 (full) 或增量模式 (incremental)")
     parser.add_argument("--month", help="指定月份 (YYYY-MM)")
+    parser.add_argument("--force", action="store_true",
+                        help="强制重新下载，跳过已下载记录的去重检查")
+    parser.add_argument("--days", type=int, default=30,
+                        help="增量模式的天数范围 (默认 30)")
     args = parser.parse_args()
-    run(args.mode, args.month)
+    run(args.mode, args.month, force=args.force, days=args.days)

@@ -9,10 +9,10 @@ API_BASE = "https://api.znzmo.com"
 SITE_BASE = "https://www.znzmo.com"
 PRIVILEGE_PAGE = f"{SITE_BASE}/personalCenter/usercenter_privilege.html"
 
-DELAY_MIN = 5
-DELAY_MAX = 15
-PAGE_DELAY_MIN = 10
-PAGE_DELAY_MAX = 20
+DELAY_MIN = 3
+DELAY_MAX = 8
+PAGE_DELAY_MIN = 8
+PAGE_DELAY_MAX = 15
 
 FULL_MODE_WORK_SECONDS = 3600
 FULL_MODE_REST_MIN = 300
