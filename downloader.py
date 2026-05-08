@@ -335,6 +335,8 @@ class DownloadJob:
         self.log_callback = log_callback or (lambda lvl, msg: print(msg))
         self.progress_callback = progress_callback or (lambda p, t, c: None)
         self.stop_flag = False
+        if self.mode == "incremental" and not self.start_date:
+            raise ValueError("start_date is required for incremental mode")
 
     def stop(self):
         self.stop_flag = True
@@ -386,6 +388,12 @@ class DownloadJob:
             start_page = 1
             cutoff_time = self.start_date + " 00:00:00" if self.start_date else None
             end_time = self.end_date + " 23:59:59"
+
+        # 启动日志
+        if self.mode == "full":
+            self.log(f"全量模式: 从第 {start_page} 页开始")
+        else:
+            self.log(f"增量模式: {self.start_date} 至 {self.end_date}")
 
         consecutive_429 = 0
         request_count = 0
@@ -565,7 +573,7 @@ class DownloadJob:
         self.log(f"下载完成。共 {downloaded_count} 条，最后页码: {highest_page_seen}")
 
 
-def run(mode, target_month=None, force=False, days=30):
+def run(mode, force=False, days=30):
     """CLI 入口，兼容原有命令行调用。"""
     start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d") if mode == "incremental" else None
     end_date = datetime.now().strftime("%Y-%m-%d")
@@ -582,10 +590,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="知末下载记录归档工具")
     parser.add_argument("--mode", choices=["full", "incremental"], default="incremental",
                         help="全量模式 (full) 或增量模式 (incremental)")
-    parser.add_argument("--month", help="指定月份 (YYYY-MM)")
     parser.add_argument("--force", action="store_true",
                         help="强制重新下载，跳过已下载记录的去重检查")
     parser.add_argument("--days", type=int, default=30,
                         help="增量模式的天数范围 (默认 30)")
     args = parser.parse_args()
-    run(args.mode, args.month, force=args.force, days=args.days)
+    run(args.mode, force=args.force, days=args.days)
