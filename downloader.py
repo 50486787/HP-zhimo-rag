@@ -27,7 +27,7 @@ CHILD_CONSUMER_LIST_API = f"{API_BASE}/enterprise/childConsumerList"
 # === commodityType 映射 ===
 COMMODITY_TYPE_MAP = {
     0: "3d", 3: "3d", 4: "su", 5: "sgt",
-    2: "tietu", 8: "ziliaoku", 20: "wenben",
+    2: "tietu", 8: "ziliaoku", 20: "wenben", 30: "ps",
 }
 
 MODEL_PAGE_TEMPLATES = {
@@ -37,6 +37,7 @@ MODEL_PAGE_TEMPLATES = {
     "tietu": "https://tietu.znzmo.com/tietu/{skuid}.html",
     "ziliaoku": "https://www.znzmo.com/ziliaoku/{skuid}.html",
     "wenben": "https://wenben.znzmo.com/wenben/{skuid}.html",
+    "ps": "https://ps.znzmo.com/pschannel/{skuid}.html",
 }
 
 IMAGE_COMMODITY_TYPES = {2}
@@ -84,16 +85,20 @@ def build_session(cookies_json):
         "User-Agent": random_ua(),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
         "Origin": SITE_BASE,
     })
     if cookies_json:
         cookies = json.loads(cookies_json)
         for c in cookies:
+            domain = c.get("domain", "")
+            # 只保留 znzmo 相关域的 cookie，避免无关 cookie 干扰
+            if not (domain.endswith("znzmo.com") or domain.endswith("znzmo.cn")):
+                continue
             session.cookies.set(
                 c["name"], c["value"],
-                domain=c.get("domain", ""),
+                domain=domain,
                 path=c.get("path", "/"),
+                secure=c.get("secure", False),
             )
     return session
 
@@ -344,6 +349,16 @@ class DownloadJob:
     def stop(self):
         self.stop_flag = True
 
+    def _cleanup_playwright(self):
+        """安全释放 Playwright 资源，异常安全。"""
+        for obj in (self._pw_context, self._browser, self._playwright):
+            if obj:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+        self._pw_context = self._browser = self._playwright = None
+
     def log(self, msg, level="info"):
         self.log_callback(level, msg)
 
@@ -361,12 +376,13 @@ class DownloadJob:
         session = build_session(cookies_json)
         cookies = json.loads(cookies_json)
 
-        playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(headless=False, args=[
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=False, args=[
             "--window-position=-32000,-32000",
         ])
-        pw_context = browser.new_context()
-        pw_context.add_cookies(cookies)
+        self._pw_context = self._browser.new_context()
+        self._pw_context.add_cookies(cookies)
+        pw_context = self._pw_context
 
         try:
             self.log("获取企业信息...")
@@ -377,9 +393,6 @@ class DownloadJob:
             member_level = ent_info["member_level"]
         except Exception as e:
             self.log(f"获取企业信息失败: {e}", "error")
-            pw_context.close()
-            browser.close()
-            playwright.stop()
             return
 
         api_url = get_consumer_list_api(member_level)
@@ -494,8 +507,12 @@ class DownloadJob:
                 if self.skip_downloaded:
                     existing = get_download_record(DB_PATH, model_id)
                     if existing and existing["status"] == "done":
-                        self.log(f"  [{model_id}] 已下载，跳过")
-                        continue
+                        file_path = existing.get("file_path", "")
+                        if file_path and os.path.exists(file_path):
+                            self.log(f"  [{model_id}] 已下载，跳过")
+                            continue
+                        else:
+                            self.log(f"  [{model_id}] 文件已删除，重新下载")
 
                 insert_download_record(DB_PATH, record)
 
@@ -505,8 +522,6 @@ class DownloadJob:
                     month_dir = os.path.join(self.download_dir, month)
                 else:
                     month_dir = os.path.join(self.download_dir, month, type_name)
-                self.ensure_job_dir(month_dir)
-
                 self.ensure_job_dir(month_dir)
 
                 try:
@@ -527,11 +542,10 @@ class DownloadJob:
 
                 model_name_part = sanitize_filename(name_no_ext)
 
+                file_path = os.path.join(month_dir, f"{model_name_part}_{model_id}{ext}")
                 if is_img:
-                    file_path = os.path.join(month_dir, f"{model_name_part}_{model_id}{ext}")
                     preview_path = None
                 else:
-                    file_path = os.path.join(month_dir, f"{model_name_part}_{model_id}{ext}")
                     preview_path = os.path.join(month_dir, f"{model_name_part}_{model_id}.jpg")
 
                 delay = random_delay()
@@ -583,9 +597,7 @@ class DownloadJob:
                 self.log(f"已到达最后一页 (第 {total_pages} 页)，结束。")
                 break
 
-        pw_context.close()
-        browser.close()
-        playwright.stop()
+        self._cleanup_playwright()
         self.progress_callback(highest_page_seen, total_pages, downloaded_count)
         self.log(f"下载完成。共 {downloaded_count} 条，最后页码: {highest_page_seen}")
 

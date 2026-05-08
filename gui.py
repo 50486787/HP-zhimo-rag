@@ -18,7 +18,7 @@ from login import login_and_save_cookies
 class DownloaderGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("知末下载器")
+        self.root.title("知末企业VIP下载器")
         self.root.geometry("780x700")
         self.root.minsize(600, 500)
 
@@ -36,6 +36,8 @@ class DownloaderGUI:
     def _on_close(self):
         if self.job:
             self.job.stop()
+            if self.job_thread and self.job_thread.is_alive():
+                self.job_thread.join(timeout=5)
         self.root.destroy()
 
     def _setup_ui(self):
@@ -114,9 +116,12 @@ class DownloaderGUI:
         self.progress_bar = ttk.Progressbar(control_frame, mode="indeterminate", length=200)
         self.progress_bar.pack(side=tk.RIGHT, padx=(0, 5))
 
-        # 4. 运行日志
-        log_frame = ttk.LabelFrame(self.root, text="运行日志", padding=5)
-        log_frame.pack(fill=tk.BOTH, expand=True, **pad)
+        # 4-5. 日志 + 历史 (PanedWindow 分割)
+        paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
+        paned.pack(fill=tk.BOTH, expand=True, **pad)
+
+        log_frame = ttk.LabelFrame(paned, text="运行日志", padding=5)
+        paned.add(log_frame, weight=3)
 
         self.log_text = tk.Text(log_frame, wrap=tk.WORD, state=tk.DISABLED,
                                 font=("Consolas", 10), bg="#fafafa", relief=tk.SOLID,
@@ -131,9 +136,8 @@ class DownloaderGUI:
         self.log_text.configure(yscrollcommand=log_scroll.set)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # 5. 下载历史
-        history_frame = ttk.LabelFrame(self.root, text="下载历史（按日期汇总）", padding=5)
-        history_frame.pack(fill=tk.BOTH, **pad)
+        history_frame = ttk.LabelFrame(paned, text="下载历史（按日期汇总）", padding=5)
+        paned.add(history_frame, weight=1)
 
         columns = ("日期", "总数", "成功", "失败")
         self.history_tree = ttk.Treeview(history_frame, columns=columns,
@@ -193,12 +197,18 @@ class DownloaderGUI:
 
     def _on_login(self):
         self._log("打开浏览器登录...")
+        self.start_btn.config(state=tk.DISABLED)
+        threading.Thread(target=self._run_login, daemon=True).start()
+
+    def _run_login(self):
         try:
-            login_and_save_cookies()
-            self._log("登录完成")
-            self._refresh_account_info()
+            login_and_save_cookies(gui_mode=True)
+            self._enqueue_log("info", "登录完成")
+            self.root.after(0, self._refresh_account_info)
         except Exception as e:
-            self._log(f"登录失败: {e}", "error")
+            self._enqueue_log("error", f"登录失败: {e}")
+        finally:
+            self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
 
     def _on_browse_dir(self):
         path = filedialog.askdirectory(initialdir=self.dir_var.get())
@@ -246,6 +256,7 @@ class DownloaderGUI:
         except Exception as e:
             self._enqueue_log("error", f"下载任务异常: {e}")
         finally:
+            self.job._cleanup_playwright()
             self._enqueue_log("done", "")
 
     def _on_stop(self):
@@ -310,8 +321,8 @@ class DownloaderGUI:
             for date_str, total, done, failed in rows:
                 self.history_tree.insert("", tk.END,
                                          values=(date_str, total, done, failed))
-        except Exception:
-            pass
+        except Exception as e:
+            self._log(f"加载历史失败: {e}", "warn")
 
     def _on_history_double_click(self, event):
         selection = self.history_tree.selection()
