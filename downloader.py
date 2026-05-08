@@ -460,14 +460,23 @@ class DownloadJob:
 
             # 增量模式：过滤日期范围
             if self.mode == "incremental":
+                # API 按时间倒序，本页全部比范围上限还新 → 跳过继续翻页
+                oldest_on_page = min(r.get("createTime", "") for r in records)
+                if oldest_on_page > end_time:
+                    self.log(f"第 {page} 页: 全部比 {self.end_date} 新，跳过")
+                    page += 1
+                    save_checkpoint(DB_PATH, self.mode, page - 1, total_pages)
+                    continue
+                # 本页全部比范围下限还旧 → 到达边界，停止
+                newest_on_page = max(r.get("createTime", "") for r in records)
+                if newest_on_page < cutoff_time:
+                    self.log(f"已到达日期范围边界，结束。")
+                    break
                 filtered = [r for r in records
                             if r.get("createTime", "") >= cutoff_time
                             and r.get("createTime", "") <= end_time]
                 if len(filtered) < len(records):
                     self.log(f"第 {page} 页: {len(records)} 条中 {len(filtered)} 条在日期范围内")
-                if not filtered:
-                    self.log(f"已到达日期范围边界，结束。")
-                    break
                 records = filtered
 
             self.log(f"第 {page} 页: {len(records)} 条记录")
