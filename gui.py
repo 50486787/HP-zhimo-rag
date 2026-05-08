@@ -31,6 +31,12 @@ class DownloaderGUI:
         self._refresh_account_info()
         self._refresh_history()
         self.root.after(100, self._poll_queues)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        if self.job:
+            self.job.stop()
+        self.root.destroy()
 
     def _setup_ui(self):
         pad = {"padx": 10, "pady": 5}
@@ -238,9 +244,9 @@ class DownloaderGUI:
         try:
             self.job.run()
         except Exception as e:
-            self._enqueue_log(f"下载任务异常: {e}", "error")
+            self._enqueue_log("error", f"下载任务异常: {e}")
         finally:
-            self._enqueue_log("", "done")
+            self._enqueue_log("done", "")
 
     def _on_stop(self):
         if self.job:
@@ -249,7 +255,7 @@ class DownloaderGUI:
 
     # ── 日志 / 进度队列 ──
 
-    def _enqueue_log(self, msg, level="info"):
+    def _enqueue_log(self, level, msg):
         self.log_queue.put((level, msg))
 
     def _enqueue_progress(self, page, total_pages, count):
@@ -275,8 +281,8 @@ class DownloaderGUI:
                     self.start_btn.config(state=tk.NORMAL)
                     self.stop_btn.config(state=tk.DISABLED)
                     self._refresh_history()
-                    return
-                self._log(msg, level)
+                else:
+                    self._log(msg, level)
         except queue.Empty:
             pass
 
