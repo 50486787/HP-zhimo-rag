@@ -424,11 +424,6 @@ class DownloadJob:
                     break
                 work_start = time.time()
 
-            if page > start_page:
-                delay = random_page_delay()
-                self.log(f"翻页间隔 {delay:.1f}s...")
-                time.sleep(delay)
-
             self.log(f"获取第 {page} 页...")
             try:
                 records, total = fetch_records_page(session, api_url, enterprise_id, page)
@@ -466,6 +461,7 @@ class DownloadJob:
                     self.log(f"第 {page} 页: 全部比 {self.end_date} 新，跳过")
                     page += 1
                     save_checkpoint(DB_PATH, self.mode, page - 1, total_pages)
+                    time.sleep(1)
                     continue
                 # 本页全部比范围下限还旧 → 到达边界，停止
                 newest_on_page = max(r.get("createTime", "") for r in records)
@@ -478,6 +474,12 @@ class DownloadJob:
                 if len(filtered) < len(records):
                     self.log(f"第 {page} 页: {len(records)} 条中 {len(filtered)} 条在日期范围内")
                 records = filtered
+
+            # 翻页间隔（实际有内容的翻页才等）
+            if page > start_page:
+                delay = random_page_delay()
+                self.log(f"翻页间隔 {delay:.1f}s...")
+                time.sleep(delay)
 
             self.log(f"第 {page} 页: {len(records)} 条记录")
 
