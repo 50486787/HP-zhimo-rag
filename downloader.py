@@ -115,6 +115,7 @@ def get_enterprise_info(session):
     return {
         "enterprise_id": info.get("enterpriseId"),
         "member_level": info.get("memberLevel", 0),
+        "nick_name": info.get("nickName", ""),
     }
 
 
@@ -345,7 +346,8 @@ def run(mode, target_month=None, force=False, days=30):
         ent_info = get_enterprise_info(session)
         enterprise_id = ent_info["enterprise_id"]
         member_level = ent_info["member_level"]
-        print(f"  enterpriseId: {enterprise_id}, memberLevel: {member_level}")
+        nick_name = ent_info["nick_name"]
+        print(f"  enterpriseId: {enterprise_id}, memberLevel: {member_level}, nickName: {nick_name}")
     except Exception as e:
         print(f"获取企业信息失败: {e}")
         pw_context.close()
