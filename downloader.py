@@ -321,221 +321,261 @@ def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
-def run(mode, target_month=None, force=False, days=30):
-    """主入口。"""
-    init_db(DB_PATH)
-    cookies_json = get_cookies(DB_PATH)
-    if not cookies_json:
-        print("未找到 cookie，请先运行: python login.py")
-        return
+class DownloadJob:
+    """下载任务，可从 GUI 或 CLI 调用。"""
 
-    session = build_session(cookies_json)
+    def __init__(self, mode, start_date=None, end_date=None,
+                 skip_downloaded=True, download_dir=None,
+                 log_callback=None, progress_callback=None):
+        self.mode = mode
+        self.start_date = start_date
+        self.end_date = end_date or datetime.now().strftime("%Y-%m-%d")
+        self.skip_downloaded = skip_downloaded
+        self.download_dir = download_dir or DOWNLOAD_DIR
+        self.log_callback = log_callback or (lambda lvl, msg: print(msg))
+        self.progress_callback = progress_callback or (lambda p, t, c: None)
+        self.stop_flag = False
 
-    # 启动 Playwright 浏览器（用于触发下载，获取 CDN URL）
-    cookies = json.loads(cookies_json)
-    playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(headless=False, args=[
-        "--window-position=-32000,-32000",  # 窗口移到屏幕外，不弹窗
-    ])
-    pw_context = browser.new_context()
-    pw_context.add_cookies(cookies)
+    def stop(self):
+        self.stop_flag = True
 
-    # 获取企业信息
-    print("获取企业信息...")
-    try:
-        ent_info = get_enterprise_info(session)
-        enterprise_id = ent_info["enterprise_id"]
-        member_level = ent_info["member_level"]
-        nick_name = ent_info["nick_name"]
-        print(f"  enterpriseId: {enterprise_id}, memberLevel: {member_level}, nickName: {nick_name}")
-    except Exception as e:
-        print(f"获取企业信息失败: {e}")
+    def log(self, msg, level="info"):
+        self.log_callback(level, msg)
+
+    def ensure_job_dir(self, path):
+        os.makedirs(path, exist_ok=True)
+
+    def run(self):
+        """执行下载任务（原 run() 逻辑）。"""
+        init_db(DB_PATH)
+        cookies_json = get_cookies(DB_PATH)
+        if not cookies_json:
+            self.log("未找到 cookie，请先登录", "error")
+            return
+
+        session = build_session(cookies_json)
+        cookies = json.loads(cookies_json)
+
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(headless=False, args=[
+            "--window-position=-32000,-32000",
+        ])
+        pw_context = browser.new_context()
+        pw_context.add_cookies(cookies)
+
+        try:
+            self.log("获取企业信息...")
+            ent_info = get_enterprise_info(session)
+            enterprise_id = ent_info["enterprise_id"]
+            nick_name = ent_info.get("nick_name", "")
+            self.log(f"账号: {nick_name} (ID: {enterprise_id})")
+            member_level = ent_info["member_level"]
+        except Exception as e:
+            self.log(f"获取企业信息失败: {e}", "error")
+            pw_context.close()
+            browser.close()
+            playwright.stop()
+            return
+
+        api_url = get_consumer_list_api(member_level)
+
+        if self.mode == "full":
+            cp = get_checkpoint(DB_PATH)
+            start_page = cp["current_page"] if cp and cp["mode"] == "full" else 1
+        else:
+            start_page = 1
+            cutoff_time = self.start_date + " 00:00:00" if self.start_date else None
+            end_time = self.end_date + " 23:59:59"
+
+        consecutive_429 = 0
+        request_count = 0
+        downloaded_count = 0
+        work_start = time.time()
+        page = start_page
+        highest_page_seen = start_page
+        total_pages = None
+
+        while True:
+            if self.stop_flag:
+                self.log("收到停止信号，正在退出...", "warn")
+                save_checkpoint(DB_PATH, self.mode, highest_page_seen, total_pages)
+                break
+
+            if self.mode == "full" and time.time() - work_start > FULL_MODE_WORK_SECONDS:
+                rest = random_rest_duration()
+                self.log(f"已运行约 1 小时，休息 {rest:.0f} 秒...")
+                for _ in range(int(rest)):
+                    if self.stop_flag:
+                        break
+                    time.sleep(1)
+                if self.stop_flag:
+                    save_checkpoint(DB_PATH, self.mode, highest_page_seen, total_pages)
+                    break
+                work_start = time.time()
+
+            if page > start_page:
+                delay = random_page_delay()
+                self.log(f"翻页间隔 {delay:.1f}s...")
+                time.sleep(delay)
+
+            self.log(f"获取第 {page} 页...")
+            try:
+                records, total = fetch_records_page(session, api_url, enterprise_id, page)
+            except Exception as e:
+                self.log(f"获取第 {page} 页失败: {e}", "error")
+                save_checkpoint(DB_PATH, self.mode, page, total_pages)
+                break
+
+            if records is None:  # 429
+                consecutive_429 += 1
+                if consecutive_429 >= MAX_CONSECUTIVE_429:
+                    self.log(f"连续 {MAX_CONSECUTIVE_429} 次 429，停止。", "error")
+                    save_checkpoint(DB_PATH, self.mode, page, total_pages)
+                    break
+                delay = RATE_LIMIT_BACKOFF * consecutive_429
+                self.log(f"429 限流，等待 {delay}s...", "warn")
+                time.sleep(delay)
+                continue
+
+            consecutive_429 = 0
+
+            if total and not total_pages:
+                total_pages = (total + 9) // 10
+                self.log(f"总记录数: {total}, 约 {total_pages} 页")
+
+            if not records:
+                self.log(f"第 {page} 页无记录，结束。")
+                break
+
+            # 增量模式：过滤日期范围
+            if self.mode == "incremental":
+                filtered = [r for r in records
+                            if r.get("createTime", "") >= cutoff_time
+                            and r.get("createTime", "") <= end_time]
+                if len(filtered) < len(records):
+                    self.log(f"第 {page} 页: {len(records)} 条中 {len(filtered)} 条在日期范围内")
+                if not filtered:
+                    self.log(f"已到达日期范围边界，结束。")
+                    break
+                records = filtered
+
+            self.log(f"第 {page} 页: {len(records)} 条记录")
+
+            for item in records:
+                if self.stop_flag:
+                    break
+                record = parse_record(item)
+                model_id = record["model_id"]
+                commodity_type = record["commodity_type"]
+                is_img = is_image_type(commodity_type)
+
+                if self.skip_downloaded:
+                    existing = get_download_record(DB_PATH, model_id)
+                    if existing and existing["status"] == "done":
+                        self.log(f"  [{model_id}] 已下载，跳过")
+                        continue
+
+                insert_download_record(DB_PATH, record)
+
+                month = record["month"] or self.end_date[:7]
+                type_name = commodity_type_name(commodity_type)
+                if type_name == "su":
+                    month_dir = os.path.join(self.download_dir, month)
+                else:
+                    month_dir = os.path.join(self.download_dir, month, type_name)
+                self.ensure_job_dir(month_dir)
+
+                try:
+                    cdn_url, cdn_filename, preview_url = download_one_model(
+                        pw_context, model_id, commodity_type)
+                except Exception as e:
+                    self.log(f"  [{model_id}] 获取下载链接失败: {e}", "error")
+                    update_download_status(DB_PATH, model_id, "failed", error_msg=str(e))
+                    continue
+
+                if cdn_filename:
+                    name_no_ext, ext = os.path.splitext(cdn_filename)
+                    if not ext:
+                        ext = ".zip"
+                else:
+                    name_no_ext = model_id
+                    ext = ".zip"
+
+                model_name_part = sanitize_filename(name_no_ext)
+
+                if is_img:
+                    file_path = os.path.join(month_dir, f"{model_name_part}_{model_id}{ext}")
+                    preview_path = None
+                else:
+                    file_path = os.path.join(month_dir, f"{model_name_part}_{model_id}{ext}")
+                    preview_path = os.path.join(month_dir, f"{model_name_part}_{model_id}.jpg")
+
+                delay = random_delay()
+                self.log(f"  [{model_id}] 下载 {model_name_part}{ext} (等待 {delay:.1f}s)...")
+                time.sleep(delay)
+
+                try:
+                    ok = download_file(session, cdn_url, file_path)
+                    if not ok:
+                        raise Exception("文件大小不匹配")
+                except Exception as e:
+                    self.log(f"  [{model_id}] 下载失败: {e}", "error")
+                    update_download_status(DB_PATH, model_id, "failed", error_msg=str(e))
+                    continue
+
+                if not is_img and preview_url:
+                    try:
+                        time.sleep(random.uniform(2, 5))
+                        download_file(session, preview_url, preview_path, timeout=60)
+                        self.log(f"  [{model_id}] 预览图已保存")
+                    except Exception as e:
+                        self.log(f"  [{model_id}] 预览图下载失败: {e}", "error")
+                        preview_path = None
+
+                update_download_status(DB_PATH, model_id, "done",
+                                       file_path=file_path, preview_path=preview_path)
+                self.log(f"  [{model_id}] 完成")
+                downloaded_count += 1
+
+                request_count += 1
+                if request_count % KEEPALIVE_INTERVAL == 0:
+                    try:
+                        session.get(SITE_BASE, timeout=10)
+                        self.log("  [keepalive] 刷新会话")
+                    except Exception:
+                        pass
+
+            if self.stop_flag:
+                save_checkpoint(DB_PATH, self.mode, highest_page_seen, total_pages)
+                break
+
+            highest_page_seen = page
+            self.progress_callback(page, total_pages, downloaded_count)
+            save_checkpoint(DB_PATH, self.mode, highest_page_seen, total_pages)
+            page += 1
+
+            if self.mode == "full" and total_pages and page > total_pages:
+                self.log(f"已到达最后一页 (第 {total_pages} 页)，结束。")
+                break
+
         pw_context.close()
         browser.close()
         playwright.stop()
-        return
+        self.progress_callback(highest_page_seen, total_pages, downloaded_count)
+        self.log(f"下载完成。共 {downloaded_count} 条，最后页码: {highest_page_seen}")
 
-    api_url = get_consumer_list_api(member_level)
 
-    # 断点恢复
-    ...
-    if mode == "full":
-        cp = get_checkpoint(DB_PATH)
-        start_page = cp["current_page"] if cp and cp["mode"] == "full" else 1
-        print(f"全量模式: 从第 {start_page} 页开始")
-    else:
-        start_page = 1
-        cutoff_time = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-        target = target_month or f"最近{days}天"
-        if force:
-            target += " (强制重新下载)"
-        print(f"增量模式: {target}")
-
-    consecutive_429 = 0
-    request_count = 0
-    work_start = time.time()
-    page = start_page
-    highest_page_seen = start_page
-    total_pages = None
-
-    while True:
-        # 全量模式分段休息
-        if mode == "full" and time.time() - work_start > FULL_MODE_WORK_SECONDS:
-            rest = random_rest_duration()
-            print(f"已运行约 1 小时，休息 {rest:.0f} 秒...")
-            time.sleep(rest)
-            work_start = time.time()
-
-        # 翻页间隔
-        if page > start_page:
-            delay = random_page_delay()
-            print(f"翻页间隔 {delay:.1f}s...")
-            time.sleep(delay)
-
-        print(f"获取第 {page} 页...")
-        try:
-            records, total = fetch_records_page(session, api_url, enterprise_id, page)
-        except Exception as e:
-            print(f"获取第 {page} 页失败: {e}")
-            save_checkpoint(DB_PATH, mode, page, total_pages)
-            break
-
-        if records is None:  # 429
-            consecutive_429 += 1
-            if consecutive_429 >= MAX_CONSECUTIVE_429:
-                print(f"连续 {MAX_CONSECUTIVE_429} 次 429，停止。")
-                save_checkpoint(DB_PATH, mode, page, total_pages)
-                pw_context.close()
-                browser.close()
-                playwright.stop()
-                return
-            delay = RATE_LIMIT_BACKOFF * consecutive_429
-            print(f"429 限流，等待 {delay}s...")
-            time.sleep(delay)
-            continue
-
-        consecutive_429 = 0
-
-        if total and not total_pages:
-            total_pages = (total + 9) // 10
-            print(f"总记录数: {total}, 约 {total_pages} 页")
-
-        if not records:
-            print(f"第 {page} 页无记录，结束。")
-            break
-
-        # 增量模式：过滤时间范围
-        if mode == "incremental":
-            filtered = [r for r in records if r.get("createTime", "") >= cutoff_time]
-            if len(filtered) < len(records):
-                print(f"第 {page} 页: {len(records)} 条中 {len(filtered)} 条在 {days} 天内")
-            if not filtered:
-                print(f"已到达 {days} 天边界，结束。")
-                break
-            records = filtered
-
-        print(f"第 {page} 页: {len(records)} 条记录")
-
-        for item in records:
-            record = parse_record(item)
-            model_id = record["model_id"]
-            commodity_type = record["commodity_type"]
-            is_img = is_image_type(commodity_type)
-
-            # 去重（--force 时跳过此检查）
-            if not force:
-                existing = get_download_record(DB_PATH, model_id)
-                if existing and existing["status"] == "done":
-                    print(f"  [{model_id}] 已下载，跳过")
-                    continue
-
-            insert_download_record(DB_PATH, record)
-
-            month = record["month"] or (target_month if target_month else "unknown")
-            type_name = commodity_type_name(commodity_type)
-            if type_name == "su":
-                month_dir = os.path.join(DOWNLOAD_DIR, month)
-            else:
-                month_dir = os.path.join(DOWNLOAD_DIR, month, type_name)
-            ensure_dir(month_dir)
-
-            # 用 Playwright 浏览器触发下载，捕获 CDN URL
-            try:
-                cdn_url, cdn_filename, preview_url = download_one_model(
-                    pw_context, model_id, commodity_type)
-            except Exception as e:
-                print(f"  [{model_id}] 获取下载链接失败: {e}")
-                update_download_status(DB_PATH, model_id, "failed", error_msg=str(e))
-                continue
-
-            # 从 CDN 文件名确定扩展名和基础名
-            if cdn_filename:
-                name_no_ext, ext = os.path.splitext(cdn_filename)
-                if not ext:
-                    ext = ".zip"
-            else:
-                name_no_ext = model_id
-                ext = ".zip"
-
-            model_name_part = sanitize_filename(name_no_ext)
-
-            # 文件路径
-            if is_img:
-                file_path = os.path.join(month_dir, f"{model_name_part}_{model_id}{ext}")
-                preview_path = None
-            else:
-                file_path = os.path.join(month_dir, f"{model_name_part}_{model_id}{ext}")
-                preview_path = os.path.join(month_dir, f"{model_name_part}_{model_id}.jpg")
-
-            # 随机延迟后下载模型文件
-            delay = random_delay()
-            print(f"  [{model_id}] 下载 {model_name_part}{ext} (等待 {delay:.1f}s)...")
-            time.sleep(delay)
-
-            try:
-                ok = download_file(session, cdn_url, file_path)
-                if not ok:
-                    raise Exception("文件大小不匹配")
-            except Exception as e:
-                print(f"  [{model_id}] 下载失败: {e}")
-                update_download_status(DB_PATH, model_id, "failed", error_msg=str(e))
-                continue
-
-            # 非贴图类型：下载预览图
-            if not is_img and preview_url:
-                try:
-                    time.sleep(random.uniform(2, 5))
-                    download_file(session, preview_url, preview_path, timeout=60)
-                    print(f"  [{model_id}] 预览图已保存")
-                except Exception as e:
-                    print(f"  [{model_id}] 预览图下载失败: {e}")
-                    preview_path = None
-
-            update_download_status(DB_PATH, model_id, "done",
-                                   file_path=file_path, preview_path=preview_path)
-            print(f"  [{model_id}] 完成")
-
-            request_count += 1
-            if request_count % KEEPALIVE_INTERVAL == 0:
-                try:
-                    session.get(SITE_BASE, timeout=10)
-                    print("  [keepalive] 刷新会话")
-                except Exception:
-                    pass
-
-        highest_page_seen = page
-        save_checkpoint(DB_PATH, mode, highest_page_seen, total_pages)
-        page += 1
-
-        # 全量模式下给一个明确的页数感知
-        if mode == "full" and total_pages and page > total_pages:
-            print(f"已到达最后一页 (第 {total_pages} 页)，结束。")
-            break
-
-    pw_context.close()
-    browser.close()
-    playwright.stop()
-    print(f"下载完成。最后页码: {highest_page_seen}")
+def run(mode, target_month=None, force=False, days=30):
+    """CLI 入口，兼容原有命令行调用。"""
+    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d") if mode == "incremental" else None
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    job = DownloadJob(
+        mode=mode,
+        start_date=start_date,
+        end_date=end_date,
+        skip_downloaded=not force,
+    )
+    job.run()
 
 
 if __name__ == "__main__":
