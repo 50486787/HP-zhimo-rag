@@ -73,6 +73,36 @@ def update_download_status(db_path, model_id, status, file_path=None, preview_pa
     conn.close()
 
 
+def get_daily_summary(db_path):
+    """按日期汇总下载记录，返回 [(date, total, done, failed), ...]"""
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("""
+        SELECT date(created_at) as d,
+               COUNT(*) as total,
+               SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as done,
+               SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+        FROM download_records
+        GROUP BY d
+        ORDER BY d DESC
+    """).fetchall()
+    conn.close()
+    return rows
+
+
+def get_records_by_date(db_path, date_str):
+    """获取指定日期的下载记录详情。"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("""
+        SELECT model_id, model_name, status, file_path, preview_path, error_msg
+        FROM download_records
+        WHERE date(created_at) = ?
+        ORDER BY created_at DESC
+    """, (date_str,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def save_checkpoint(db_path, mode, current_page, total_pages, last_model_id=None):
     conn = sqlite3.connect(db_path)
     conn.execute("""
