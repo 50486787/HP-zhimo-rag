@@ -48,6 +48,18 @@ def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
 
+def retry_io(func, max_retries=3, base_delay=3):
+    """IO 操作重试，应对 NAS 磁盘满/连接中断等瞬态错误。"""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except (OSError, IOError) as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            time.sleep(delay)
+
+
 def is_image_type(commodity_type):
     """贴图类 (commodityType=2) 本身即是图片，无需单独下载预览图。"""
     return commodity_type in IMAGE_COMMODITY_TYPES
@@ -153,6 +165,46 @@ def fetch_records_page(session, api_url, enterprise_id, page, page_size=10):
     return result.get("list", []), result.get("totalCount", 0)
 
 
+def _save_url_to_path(url, referer, dest_path):
+    """直接下载 URL 到路径，每次调用重新请求（方便重试）。"""
+    resp = requests.get(url, headers={
+        "User-Agent": random_ua(),
+        "Referer": referer,
+    }, stream=True, timeout=300)
+    resp.raise_for_status()
+    with open(dest_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=65536):
+            f.write(chunk)
+
+
+def _extract_full_image_url(page):
+    """从页面提取全分辨率图片 URL（贴图等图片类型兜底）。"""
+    url = page.evaluate("""() => {
+        try {
+            const nd = document.getElementById('__NEXT_DATA__');
+            if (nd) {
+                const data = JSON.parse(nd.textContent);
+                const pp = data?.props?.pageProps || {};
+                const arr = pp?.imgArr || pp?.largeImgArr || pp?.detailImageArr || [];
+                if (arr.length > 0) return arr[0];
+                const main = pp?.activeSkuInfo?.mainImageUrl;
+                if (main) return main;
+            }
+        } catch(e) {}
+        const imgs = document.querySelectorAll('img');
+        for (const img of imgs) {
+            if (img.naturalWidth > 500 || img.width > 500) {
+                const s = img.src || '';
+                if (s && !s.startsWith('data:')) return s;
+            }
+        }
+        return null;
+    }""")
+    if url:
+        url = url.split("?x-oss-process")[0]
+    return url
+
+
 def download_one_model(context, model_id, commodity_type, save_dir):
     """用 Playwright 打开模型详情页，点击下载按钮，保存文件到 save_dir。
 
@@ -212,6 +264,8 @@ def download_one_model(context, model_id, commodity_type, save_dir):
         "企业免费下载", "VIP免费下载", "免费下载", "下载模型",
         "下载", "下载贴图", "下载素材", "下载图片", "免费下载贴图",
         "免费下载素材", "立即下载", "下载协议", "同意并下载",
+        "下载CAD", "CAD下载", "下载图纸", "免费下载CAD",
+        "下载SU模型", "下载SketchUp", "下载SU",
     ]
     for text in button_texts:
         try:
@@ -235,15 +289,23 @@ def download_one_model(context, model_id, commodity_type, save_dir):
             except Exception:
                 continue
 
-    # 第三轮：CSS 选择器
+    # 第三轮：CSS 选择器（含 SU 等子站专属类名）
     if not clicked:
         for sel in [
+            # 通用
             "[class*=vipFreeDownload]", "[class*=downloadBtn]",
             "[class*=vipFree]", "[class*=freeDownload]",
-            "[class*=downloadWrap]",  # 贴图页 detail__downloadWrap
-            "[class*=btnBox]",         # 按钮容器兜底
+            "[class*=downloadWrap]", "[class*=btnBox]",
             "a[class*=download]", "button[class*=download]",
             ".download-btn", "#download-btn",
+            # SU / CAD 等子站可能使用不同命名
+            "[class*=Download]", "[class*=downloadBtnBox]",
+            "[class*=toolBar]", "[class*=toolbar]",
+            "[class*=actionBar]", "[class*=action]",
+            "[class*=operation]", "[class*=operate]",
+            # 资料库 / 文本等页面
+            "[class*=fileDownload]", "[class*=file-download]",
+            "a[href*=download]", "[class*=downLoad]",
         ]:
             try:
                 el = page.locator(sel).first
@@ -254,9 +316,10 @@ def download_one_model(context, model_id, commodity_type, save_dir):
             except Exception:
                 continue
 
-    # 第四轮：遍历页面上所有按钮，找包含"下载"文字的那个
+    # 第四轮：遍历页面上所有按钮/链接，找包含"下载"文字的那个
     if not clicked:
-        buttons = page.locator("button, a, [role=button]").all()
+        buttons = page.locator(
+            "button, a, [role=button], span[onclick], div[onclick]").all()
         for btn in buttons:
             try:
                 text = btn.inner_text()
@@ -267,66 +330,166 @@ def download_one_model(context, model_id, commodity_type, save_dir):
             except Exception:
                 continue
 
+    # 第五轮：SU/CAD 等子站可能有 iframe 承载下载按钮
     if not clicked:
+        frames = page.frames
+        for frame in frames[1:]:  # 跳过主 frame
+            try:
+                for text in button_texts:
+                    el = frame.locator(f":text-is('{text}')").first
+                    if el.count() > 0:
+                        el.click(timeout=3000)
+                        clicked = True
+                        break
+                if clicked:
+                    break
+                for btn in frame.locator("button, a, [role=button]").all():
+                    try:
+                        t = btn.inner_text()
+                        if t and ("下载" in t or "download" in t.lower()):
+                            btn.click(timeout=3000)
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+                if clicked:
+                    break
+            except Exception:
+                continue
+
+    # 图片类型（贴图等）兜底：没找到按钮时直接提取原图 URL 下载
+    if not clicked and is_image_type(commodity_type):
+        image_url = _extract_full_image_url(page)
+        if image_url:
+            page.close()
+            ext = os.path.splitext(image_url.split("?")[0])[1] or ".jpg"
+            tmp_path = os.path.join(save_dir, f".tmp_dl_{model_id}")
+            _save_url_to_path(image_url, page_url, tmp_path)
+            return tmp_path, f"{model_id}{ext}", None
+        page.close()
+        raise Exception(
+            f"贴图类未找到下载按钮/图片 (type={commodity_type}, url={page_url})")
+
+    if not clicked:
+        page.close()
         raise Exception(
             f"未找到下载按钮 (type={commodity_type}/{type_name}, url={page_url})")
 
-    # 等待下载事件，如果超时则尝试处理弹窗
-    for _ in range(20):
-        if download_obj:
-            break
-        page.wait_for_timeout(500)
+    # 等待下载事件，带弹窗处理重试
+    def _wait_download(timeout_sec=12):
+        for _ in range(int(timeout_sec * 2)):
+            if download_obj:
+                return True
+            page.wait_for_timeout(500)
+        return False
 
-    if not download_obj:
-        # 可能弹出了协议确认弹窗，尝试点击"同意"/"确认"
-        for agree_text in ["同意", "确定", "同意并下载", "同意下载", "确认下载",
-                            "Agree", "OK", "Confirm"]:
+    if not _wait_download(10):
+        # 可能弹出了协议确认弹窗 / 规格选择弹窗，尝试处理
+        agree_texts = ["同意", "确定", "同意并下载", "同意下载", "确认下载",
+                        "确认", "Agree", "OK", "Confirm", "好的", "知道了",
+                        "立即下载"]
+        for agree_text in agree_texts:
             try:
                 el = page.locator(f":text-is('{agree_text}')").first
                 if el.count() > 0 and el.is_visible():
                     el.click(timeout=3000)
+                    page.wait_for_timeout(1000)
                     break
             except Exception:
                 continue
-        # 再等下载事件
-        for _ in range(60):
-            if download_obj:
-                break
-            page.wait_for_timeout(500)
+        # 弹窗关闭后，可能需要再次点击下载按钮（部分子站两段式）
+        if not _wait_download(8):
+            for text in button_texts[:6]:
+                try:
+                    el = page.locator(f":text-is('{text}')").first
+                    if el.count() > 0:
+                        el.click(timeout=3000)
+                        break
+                except Exception:
+                    continue
+            if not _wait_download(15):
+                # 最后兜底：尝试从页面 JS 状态提取下载链接
+                download_url = page.evaluate("""() => {
+                    try {
+                        const nd = document.getElementById('__NEXT_DATA__');
+                        if (nd) {
+                            const data = JSON.parse(nd.textContent);
+                            const pp = data?.props?.pageProps || {};
+                            const url = pp?.downloadUrl || pp?.fileUrl ||
+                                        pp?.activeSkuInfo?.downloadUrl ||
+                                        pp?.activeSkuInfo?.fileUrl ||
+                                        pp?.activeSkuInfo?.panoramaUrl;
+                            if (url) return url;
+                        }
+                    } catch(e) {}
+                    return null;
+                }""")
+                if not download_url:
+                    # 再试：拦截网络请求找 zip/rar 链接
+                    download_url = page.evaluate("""() => {
+                        const links = document.querySelectorAll('a[href]');
+                        for (const a of links) {
+                            const h = a.href || '';
+                            if (/\\.(zip|rar|7z|skp|max|dwg|fbx|obj|stl|glb|gltf|usd|usdz|blend|ma|mb|c4d|3ds|dxf|igs|stp|step|pdf|doc|ppt|psd|ai|cdr)$/i.test(h))
+                                return h;
+                        }
+                        return null;
+                    }""")
+                if download_url:
+                    page.close()
+                    tmp_path = os.path.join(save_dir, f".tmp_dl_{model_id}")
+                    _direct_dl = lambda: _save_url_to_path(download_url, page_url, tmp_path)
+                    retry_io(_direct_dl, max_retries=2, base_delay=5)
+                    return tmp_path, os.path.basename(download_url).split("?")[0], preview_url
 
-    if not download_obj:
-        raise Exception("未捕获到下载事件")
+                # 图片类型（贴图）兜底：提取原图直接下载
+                if is_image_type(commodity_type):
+                    image_url = _extract_full_image_url(page)
+                    if image_url:
+                        page.close()
+                        ext = os.path.splitext(image_url.split("?")[0])[1] or ".jpg"
+                        tmp_path = os.path.join(save_dir, f".tmp_dl_{model_id}")
+                        _save_url_to_path(image_url, page_url, tmp_path)
+                        return tmp_path, f"{model_id}{ext}", None
 
-    # 用 Playwright 保存下载文件（等待下载完成，防止提前关页面导致中断）
+                page.close()
+                raise Exception("未捕获到下载事件")
+
+    # 用 Playwright 保存下载文件（重试应对 NAS 瞬态错误）
     tmp_path = os.path.join(save_dir, f".tmp_dl_{model_id}")
     try:
-        download_obj.save_as(tmp_path)
+        retry_io(lambda: download_obj.save_as(tmp_path), max_retries=3, base_delay=5)
     finally:
         page.close()
     return tmp_path, download_filename, preview_url
 
 
 def download_file(session, url, dest_path, timeout=300):
-    """下载文件到指定路径。"""
+    """下载文件到指定路径，带 IO 重试。"""
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     resp = session.get(url, stream=True, timeout=timeout)
     resp.raise_for_status()
     total = int(resp.headers.get("content-length", 0))
     downloaded = 0
     tmp_path = dest_path + ".tmp"
-    with open(tmp_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=65536):
-            f.write(chunk)
-            downloaded += len(chunk)
+
+    def _write():
+        nonlocal downloaded
+        downloaded = 0
+        with open(tmp_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                f.write(chunk)
+                downloaded += len(chunk)
+
+    retry_io(_write, max_retries=2, base_delay=3)
     if total > 0 and downloaded < total:
-        os.remove(tmp_path)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return False
-    os.replace(tmp_path, dest_path)
+    retry_io(lambda: os.replace(tmp_path, dest_path), max_retries=3, base_delay=3)
     return True
-
-
-def ensure_dir(path):
-    os.makedirs(path, exist_ok=True)
 
 
 class DownloadJob:
@@ -553,13 +716,17 @@ class DownloadJob:
                 time.sleep(delay)
 
                 try:
-                    # 重命名 temp 文件到最终路径
                     if os.path.exists(file_path):
                         os.remove(file_path)
-                    os.replace(tmp_path, file_path)
+                    retry_io(lambda: os.replace(tmp_path, file_path), max_retries=3, base_delay=5)
                 except Exception as e:
                     self.log(f"  [{model_id}] 保存文件失败: {e}", "error")
                     update_download_status(DB_PATH, model_id, "failed", error_msg=str(e))
+                    # 清理临时文件
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
                     continue
 
                 if not is_img and preview_url:

@@ -18,7 +18,7 @@ from login import login_and_save_cookies
 class DownloaderGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("知末企业VIP下载器")
+        self.root.title("知末企业VIP下载器 v0.2.0")
         self.root.geometry("780x700")
         self.root.minsize(600, 500)
 
@@ -154,6 +154,9 @@ class DownloaderGUI:
         hist_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.history_tree.bind("<Double-1>", self._on_history_double_click)
+
+        version_label = ttk.Label(self.root, text="v0.2.0", foreground="#999")
+        version_label.pack(side=tk.BOTTOM, anchor=tk.E, padx=10, pady=2)
 
     # ── 日期快捷按钮 ──
 
