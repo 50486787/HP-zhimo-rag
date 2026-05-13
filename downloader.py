@@ -5,6 +5,7 @@ import random
 import time
 import json
 import argparse
+import tempfile
 import requests
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
@@ -563,6 +564,21 @@ class DownloadJob:
                     pass
         self._pw_context = self._browser = self._playwright = None
 
+    def _recover_browser(self):
+        """浏览器断开时重建 Playwright 和 context。"""
+        self.log("浏览器已断开，正在重建...", "warn")
+        self._cleanup_playwright()
+        cookies = json.loads(get_cookies(DB_PATH))
+        os.makedirs(self.download_dir, exist_ok=True)
+        tempfile.tempdir = self.download_dir
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=False, args=[
+            "--window-position=-32000,-32000",
+        ])
+        self._pw_context = self._browser.new_context()
+        self._pw_context.add_cookies(cookies)
+        self.log("浏览器已重建", "success")
+
     def log(self, msg, level="info"):
         self.log_callback(level, msg)
 
@@ -580,11 +596,9 @@ class DownloadJob:
         session = build_session(cookies_json)
         cookies = json.loads(cookies_json)
 
-        # 把临时目录指到目标盘，Chromium 下载缓存就不会撑爆 C 盘
+        # 只影响 Python tempfile（Playwright 下载缓存），不改系统环境避免 Chromium profile 上 NAS
         os.makedirs(self.download_dir, exist_ok=True)
-        os.environ["TMP"] = self.download_dir
-        os.environ["TEMP"] = self.download_dir
-        os.environ["TMPDIR"] = self.download_dir
+        tempfile.tempdir = self.download_dir
 
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=False, args=[
@@ -735,9 +749,21 @@ class DownloadJob:
                     tmp_path, dl_filename, preview_url = download_one_model(
                         pw_context, model_id, commodity_type, month_dir)
                 except Exception as e:
-                    self.log(f"  [{model_id}] 获取下载链接失败: {e}", "error")
-                    update_download_status(DB_PATH, model_id, "failed", error_msg=str(e))
-                    continue
+                    err_msg = str(e)
+                    if "closed" in err_msg.lower() or "browser" in err_msg.lower():
+                        self._recover_browser()
+                        pw_context = self._pw_context
+                        try:
+                            tmp_path, dl_filename, preview_url = download_one_model(
+                                pw_context, model_id, commodity_type, month_dir)
+                        except Exception as e2:
+                            self.log(f"  [{model_id}] 重建后仍失败: {e2}", "error")
+                            update_download_status(DB_PATH, model_id, "failed", error_msg=str(e2))
+                            continue
+                    else:
+                        self.log(f"  [{model_id}] 获取下载链接失败: {e}", "error")
+                        update_download_status(DB_PATH, model_id, "failed", error_msg=err_msg)
+                        continue
 
                 if dl_filename:
                     name_no_ext, ext = os.path.splitext(dl_filename)
