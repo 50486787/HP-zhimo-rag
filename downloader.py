@@ -205,6 +205,36 @@ def _extract_full_image_url(page):
     return url
 
 
+def _extract_download_url_from_page(page):
+    """从页面 __NEXT_DATA__ 或 DOM 链接中提取下载 URL（兜底）。"""
+    url = page.evaluate("""() => {
+        try {
+            const nd = document.getElementById('__NEXT_DATA__');
+            if (nd) {
+                const data = JSON.parse(nd.textContent);
+                const pp = data?.props?.pageProps || {};
+                const u = pp?.downloadUrl || pp?.fileUrl ||
+                          pp?.activeSkuInfo?.downloadUrl ||
+                          pp?.activeSkuInfo?.fileUrl ||
+                          pp?.activeSkuInfo?.panoramaUrl;
+                if (u) return u;
+            }
+        } catch(e) {}
+        return null;
+    }""")
+    if not url:
+        url = page.evaluate("""() => {
+            const links = document.querySelectorAll('a[href]');
+            for (const a of links) {
+                const h = a.href || '';
+                if (/\\.(zip|rar|7z|skp|max|dwg|fbx|obj|stl|glb|gltf|usd|usdz|blend|ma|mb|c4d|3ds|dxf|igs|stp|step|pdf|doc|ppt|psd|ai|cdr)$/i.test(h))
+                    return h;
+            }
+            return null;
+        }""")
+    return url
+
+
 def download_one_model(context, model_id, commodity_type, save_dir):
     """用 Playwright 打开模型详情页，点击下载按钮，保存文件到 save_dir。
 
@@ -256,18 +286,23 @@ def download_one_model(context, model_id, commodity_type, save_dir):
     if preview_url:
         preview_url = preview_url.split("?x-oss-process")[0]
 
+    # 下载按钮文本（具体→通用），主页和弹窗共用
+    _DOWNLOAD_BTN_TEXTS = [
+        "立即下载", "企业免费下载", "VIP免费下载",
+        "免费下载贴图", "免费下载素材", "免费下载",
+        "下载贴图", "下载素材", "下载图片", "下载模型",
+        "下载CAD", "CAD下载", "下载图纸", "免费下载CAD",
+        "下载SU模型", "下载SketchUp", "下载SU",
+        "同意并下载", "下载协议", "确定", "确认下载", "确认",
+        "同意", "Agree", "OK", "Confirm",
+        "下载",  # 最通用，放最后
+    ]
+
     # 点击下载按钮
     clicked = False
 
     # 第一轮：精确文本匹配
-    button_texts = [
-        "企业免费下载", "VIP免费下载", "免费下载", "下载模型",
-        "下载", "下载贴图", "下载素材", "下载图片", "免费下载贴图",
-        "免费下载素材", "立即下载", "下载协议", "同意并下载",
-        "下载CAD", "CAD下载", "下载图纸", "免费下载CAD",
-        "下载SU模型", "下载SketchUp", "下载SU",
-    ]
-    for text in button_texts:
+    for text in _DOWNLOAD_BTN_TEXTS:
         try:
             el = page.locator(f":text-is('{text}')").first
             if el.count() > 0:
@@ -335,7 +370,7 @@ def download_one_model(context, model_id, commodity_type, save_dir):
         frames = page.frames
         for frame in frames[1:]:  # 跳过主 frame
             try:
-                for text in button_texts:
+                for text in _DOWNLOAD_BTN_TEXTS:
                     el = frame.locator(f":text-is('{text}')").first
                     if el.count() > 0:
                         el.click(timeout=3000)
@@ -375,7 +410,10 @@ def download_one_model(context, model_id, commodity_type, save_dir):
         raise Exception(
             f"未找到下载按钮 (type={commodity_type}/{type_name}, url={page_url})")
 
-    # 等待下载事件，带弹窗处理重试
+    # ── 下载等待 + 弹窗主动检测 ──
+    # 点完主页按钮后主动检测是否出现弹窗（modal/dialog），
+    # 而不是被动等超时后再猜。
+
     def _wait_download(timeout_sec=12):
         for _ in range(int(timeout_sec * 2)):
             if download_obj:
@@ -383,77 +421,80 @@ def download_one_model(context, model_id, commodity_type, save_dir):
             page.wait_for_timeout(500)
         return False
 
-    if not _wait_download(10):
-        # 可能弹出了协议确认弹窗 / 规格选择弹窗，尝试处理
-        agree_texts = ["同意", "确定", "同意并下载", "同意下载", "确认下载",
-                        "确认", "Agree", "OK", "Confirm", "好的", "知道了",
-                        "立即下载"]
-        for agree_text in agree_texts:
+    def _detect_popup():
+        """检测页面上是否出现了可见的弹窗/模态框。"""
+        popup_selectors = [
+            "[role=dialog]", "[role=alertdialog]",
+            ".ant-modal-wrap", ".ant-modal-content", ".ant-modal",
+            ".el-dialog__wrapper", ".el-dialog", ".el-message-box",
+            ".modal", ".dialog", ".popup",
+            "[class*=modal]", "[class*=dialog]", "[class*=popup]",
+            "[class*=Modal]", "[class*=Dialog]",
+        ]
+        for sel in popup_selectors:
             try:
-                el = page.locator(f":text-is('{agree_text}')").first
+                el = page.locator(sel).last
                 if el.count() > 0 and el.is_visible():
-                    el.click(timeout=3000)
-                    page.wait_for_timeout(1000)
-                    break
+                    return True
             except Exception:
                 continue
-        # 弹窗关闭后，可能需要再次点击下载按钮（部分子站两段式）
-        if not _wait_download(8):
-            for text in button_texts[:6]:
-                try:
-                    el = page.locator(f":text-is('{text}')").first
-                    if el.count() > 0:
-                        el.click(timeout=3000)
-                        break
-                except Exception:
-                    continue
-            if not _wait_download(15):
-                # 最后兜底：尝试从页面 JS 状态提取下载链接
-                download_url = page.evaluate("""() => {
-                    try {
-                        const nd = document.getElementById('__NEXT_DATA__');
-                        if (nd) {
-                            const data = JSON.parse(nd.textContent);
-                            const pp = data?.props?.pageProps || {};
-                            const url = pp?.downloadUrl || pp?.fileUrl ||
-                                        pp?.activeSkuInfo?.downloadUrl ||
-                                        pp?.activeSkuInfo?.fileUrl ||
-                                        pp?.activeSkuInfo?.panoramaUrl;
-                            if (url) return url;
-                        }
-                    } catch(e) {}
-                    return null;
-                }""")
-                if not download_url:
-                    # 再试：拦截网络请求找 zip/rar 链接
-                    download_url = page.evaluate("""() => {
-                        const links = document.querySelectorAll('a[href]');
-                        for (const a of links) {
-                            const h = a.href || '';
-                            if (/\\.(zip|rar|7z|skp|max|dwg|fbx|obj|stl|glb|gltf|usd|usdz|blend|ma|mb|c4d|3ds|dxf|igs|stp|step|pdf|doc|ppt|psd|ai|cdr)$/i.test(h))
-                                return h;
-                        }
-                        return null;
-                    }""")
-                if download_url:
-                    page.close()
-                    tmp_path = os.path.join(save_dir, f".tmp_dl_{model_id}")
-                    _direct_dl = lambda: _save_url_to_path(download_url, page_url, tmp_path)
-                    retry_io(_direct_dl, max_retries=2, base_delay=5)
-                    return tmp_path, os.path.basename(download_url).split("?")[0], preview_url
+        return False
 
-                # 图片类型（贴图）兜底：提取原图直接下载
-                if is_image_type(commodity_type):
-                    image_url = _extract_full_image_url(page)
-                    if image_url:
-                        page.close()
-                        ext = os.path.splitext(image_url.split("?")[0])[1] or ".jpg"
-                        tmp_path = os.path.join(save_dir, f".tmp_dl_{model_id}")
-                        _save_url_to_path(image_url, page_url, tmp_path)
-                        return tmp_path, f"{model_id}{ext}", None
+    def _click_popup_button():
+        """点击弹窗/页面中最新出现的下载按钮（.last 获取弹窗内的按钮）。"""
+        for text in _DOWNLOAD_BTN_TEXTS:
+            try:
+                el = page.locator(f":text-is('{text}')").last
+                if el.count() > 0 and el.is_visible():
+                    el.click(timeout=3000)
+                    return True
+            except Exception:
+                continue
+        return False
 
+    def _direct_download_fallback():
+        """兜底：从页面 JS/DOM 提取下载链接直接下载，或贴图提取原图。"""
+        download_url = _extract_download_url_from_page(page)
+        if download_url:
+            page.close()
+            tmp_path = os.path.join(save_dir, f".tmp_dl_{model_id}")
+            _dl = lambda: _save_url_to_path(download_url, page_url, tmp_path)
+            retry_io(_dl, max_retries=2, base_delay=5)
+            return tmp_path, os.path.basename(download_url).split("?")[0], preview_url
+
+        if is_image_type(commodity_type):
+            image_url = _extract_full_image_url(page)
+            if image_url:
                 page.close()
-                raise Exception("未捕获到下载事件")
+                ext = os.path.splitext(image_url.split("?")[0])[1] or ".jpg"
+                tmp_path = os.path.join(save_dir, f".tmp_dl_{model_id}")
+                _save_url_to_path(image_url, page_url, tmp_path)
+                return tmp_path, f"{model_id}{ext}", None
+
+        page.close()
+        raise Exception("未捕获到下载事件")
+
+    # 先等页面响应点击（弹窗动画通常在 1-2 秒内完成）
+    page.wait_for_timeout(2500)
+
+    if download_obj:
+        # 单层弹窗：第一个按钮直接触发了下载
+        pass
+    elif _detect_popup():
+        # 检测到弹窗 → 点弹窗内的下载按钮
+        _click_popup_button()
+        if not _wait_download(10):
+            page.wait_for_timeout(1000)
+            _click_popup_button()
+            if not _wait_download(12):
+                return _direct_download_fallback()
+    else:
+        # 没有弹窗也没有下载事件 → 可能是网络慢或单层异步触发
+        if not _wait_download(8):
+            if _detect_popup():
+                _click_popup_button()
+            if not _wait_download(15):
+                return _direct_download_fallback()
 
     # 用 Playwright 保存下载文件（重试应对 NAS 瞬态错误）
     tmp_path = os.path.join(save_dir, f".tmp_dl_{model_id}")
@@ -708,11 +749,16 @@ class DownloadJob:
 
                 model_name_part = sanitize_filename(name_no_ext)
 
-                file_path = os.path.join(month_dir, f"{model_name_part}_{model_id}{ext}")
+                # 服务端文件名通常已含 model_id（如 xxxID_1192564496），避免重复追加
+                if model_id in model_name_part:
+                    stem = model_name_part
+                else:
+                    stem = f"{model_name_part}_{model_id}"
+                file_path = os.path.join(month_dir, f"{stem}{ext}")
                 if is_img:
                     preview_path = None
                 else:
-                    preview_path = os.path.join(month_dir, f"{model_name_part}_{model_id}.jpg")
+                    preview_path = os.path.splitext(file_path)[0] + ".jpg"
 
                 delay = random_delay()
                 self.log(f"  [{model_id}] 下载 {model_name_part}{ext} (等待 {delay:.1f}s)...")
