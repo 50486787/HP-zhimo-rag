@@ -580,6 +580,12 @@ class DownloadJob:
         session = build_session(cookies_json)
         cookies = json.loads(cookies_json)
 
+        # 把临时目录指到目标盘，Chromium 下载缓存就不会撑爆 C 盘
+        os.makedirs(self.download_dir, exist_ok=True)
+        os.environ["TMP"] = self.download_dir
+        os.environ["TEMP"] = self.download_dir
+        os.environ["TMPDIR"] = self.download_dir
+
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=False, args=[
             "--window-position=-32000,-32000",
@@ -722,10 +728,7 @@ class DownloadJob:
 
                 month = record["month"] or self.end_date[:7]
                 type_name = commodity_type_name(commodity_type)
-                if type_name == "su":
-                    month_dir = os.path.join(self.download_dir, month)
-                else:
-                    month_dir = os.path.join(self.download_dir, month, type_name)
+                month_dir = os.path.join(self.download_dir, month, type_name)
                 self.ensure_job_dir(month_dir)
 
                 try:
