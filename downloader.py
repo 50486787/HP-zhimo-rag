@@ -699,6 +699,9 @@ class DownloadJob:
                     name_no_ext, ext = os.path.splitext(dl_filename)
                     if not ext:
                         ext = ".zip"
+                    # 服务端返回的通用文件名，改用 model_id
+                    if name_no_ext.lower() in ("znzmo", "download", "file", "model", "untitled"):
+                        name_no_ext = model_id
                 else:
                     name_no_ext = model_id
                     ext = ".zip"
