@@ -45,6 +45,7 @@ def build_translate_prompt(top_words):
 # 重要规则
 - keywords 必须包含用户原话的全部核心实体词，不能丢失或替换
 - vector_query 用 keywords 拼接生成，不要添加用户未提及的风格/材质/植物等无关维度
+- 复合词必须拆分：如"奶油风格"→拆成"奶油"+"风格"，"现代简约"→"现代"+"简约"，修饰词和名词分开
 
 # Output JSON
 {{{{
@@ -141,11 +142,17 @@ def normalize(vecs):
 
 # ================= 打分 =================
 def keyword_match_score(keywords, text, weight):
-    """每个 ≥2 字的关键词命中 text 则 +weight"""
+    """每个 ≥2 字的关键词命中 text 则 +weight。
+    若 text 含 _ 则按 _ 分词后逐段匹配，提高精确度。"""
     score = 0
+    segments = text.split("_") if "_" in text else [text]
     for kw in keywords:
-        if len(kw) >= 2 and kw in text:
-            score += weight
+        if len(kw) < 2:
+            continue
+        for seg in segments:
+            if kw in seg:
+                score += weight
+                break  # 每关键词最多命中一次
     return score
 
 
