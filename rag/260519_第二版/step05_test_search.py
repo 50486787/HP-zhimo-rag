@@ -156,37 +156,46 @@ def keyword_match_score(keywords, text, weight):
     return score
 
 
-def search(query_vec, doc_matrix, doc_paths, doc_filenames, doc_tags_list, keywords, nas_base, top_k=10):
-    """分层打分搜索"""
-    # 基础分: cosine × 100
+def search(query_vec, doc_matrix, doc_paths, doc_filenames, doc_tags_list, keywords, nas_base, max_semantic=5):
+    """分层打分搜索。
+    有文件名/标签命中的全部显示，纯语义最多显示 max_semantic 个。"""
     q_norm = query_vec / (np.linalg.norm(query_vec) + 1e-10)
     base_scores = (doc_matrix @ q_norm) * 100
 
-    results = []
+    hits = []     # 有命中（文件名或标签）
+    semantic = []  # 纯语义（无命中）
+
     for i in range(len(doc_paths)):
-        score = float(base_scores[i])
+        fn_score = keyword_match_score(keywords, doc_filenames[i], 300)
+        tag_score = keyword_match_score(keywords, doc_tags_list[i], 100)
+        score = float(base_scores[i]) + fn_score + tag_score
 
-        # 文件名命中 +300/词
-        score += keyword_match_score(keywords, doc_filenames[i], 300)
-        # 标签命中 +100/词
-        score += keyword_match_score(keywords, doc_tags_list[i], 100)
-
-        results.append({
+        item = {
             "idx": i,
             "path": doc_paths[i],
             "filename": doc_filenames[i],
             "tags": doc_tags_list[i],
             "base_score": round(float(base_scores[i]), 1),
+            "fn_hit": fn_score > 0,
+            "tag_hit": tag_score > 0,
             "final_score": round(score, 1),
-        })
+        }
+        if fn_score > 0 or tag_score > 0:
+            hits.append(item)
+        else:
+            semantic.append(item)
 
-    results.sort(key=lambda x: x["final_score"], reverse=True)
-    return results[:top_k]
+    hits.sort(key=lambda x: x["final_score"], reverse=True)
+    semantic.sort(key=lambda x: x["final_score"], reverse=True)
+
+    return hits + semantic[:max_semantic]
 
 
 def show_results(results, nas_base):
+    n_hit = sum(1 for r in results if r.get("fn_hit") or r.get("tag_hit"))
+    n_semantic = len(results) - n_hit
     print(f"\n{'='*60}")
-    print(f"Top-{len(results)} 结果")
+    print(f"结果: {n_hit} 命中 + {n_semantic} 语义 | 共 {len(results)} 条")
     print(f"{'='*60}")
     for rank, r in enumerate(results, 1):
         fn = r["filename"]
@@ -197,7 +206,14 @@ def show_results(results, nas_base):
             style = m.group(1).strip()
         desc = r["tags"].split("|")[-1].strip()[:80]
 
-        print(f"[{rank}] {fn}")
+        # 命中标记
+        hit_mark = ""
+        if r.get("fn_hit"):
+            hit_mark += "[文件名命中]"
+        if r.get("tag_hit"):
+            hit_mark += "[标签命中]"
+
+        print(f"[{rank}] {hit_mark} {fn}")
         print(f"    路径={path} | 风格={style} | 基础={r['base_score']} 最终={r['final_score']}")
         print(f"    {desc}")
         if fn != "未知":
