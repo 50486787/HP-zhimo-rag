@@ -138,6 +138,12 @@ a { color: inherit; text-decoration: none; }
 }
 .hit-badge.fn { background: #e94560; color: #fff; }
 .hit-badge.tag { background: #e9a445; color: #1a1a2e; }
+.card-dl {
+  float: right; margin-top: 2px;
+  color: #99b; font-size: 1rem; text-decoration: none;
+  padding: 2px 6px; border-radius: 4px;
+}
+.card-dl:hover { color: #e94560; background: #2a3a5e; }
 
 /* ========== Modal ========== */
 .modal-overlay {
@@ -354,6 +360,7 @@ function renderCard(item, hitInfo) {
 
   var html = '';
   html += '<img class="card-img" src="' + esc(imgSrc) + '" loading="lazy" alt="" onerror="this.src=\'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22300%22 height=%22200%22><rect fill=%22%231a1a2e%22 width=%22300%22 height=%22200%22/><text fill=%22%23555%22 x=%22150%22 y=%22105%22 text-anchor=%22middle%22 font-size=%2214%22>无预览</text></svg>\'">';
+  var dlHref = '/download/' + encodeURIComponent(item.path) + '/' + encodeURIComponent(item.filename) + '.zip';
   html += '<div class="card-body">';
   html += '<div class="card-fn">' + esc(item.filename) + '</div>';
   if (style) {
@@ -364,9 +371,15 @@ function renderCard(item, hitInfo) {
     if (hitInfo.fn_hit) html += ' <span class="hit-badge fn">[文件名]</span>';
     if (hitInfo.tag_hit) html += ' <span class="hit-badge tag">[标签]</span>';
   }
+  html += '<a class="card-dl" href="' + esc(dlHref) + '" download title="下载ZIP">&#x2B07;</a>';
   html += '</div>';
   card.innerHTML = html;
 
+  // Download button stops propagation to avoid opening modal
+  var dlBtn = card.querySelector('.card-dl');
+  if (dlBtn) {
+    dlBtn.addEventListener('click', function(e) { e.stopPropagation(); });
+  }
   card.addEventListener('click', function() { openDetail(item); });
   return card;
 }
