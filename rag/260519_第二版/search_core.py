@@ -1,7 +1,7 @@
 """search_core.py - v2 景观搜图系统共享搜索模块
 从 step05_search.py 提取核心逻辑，供 CLI (step05) 和 Web (step06) 共用
 """
-import sys, os, json, re, time
+import sys, json, re, time
 import numpy as np
 import requests
 from openai import OpenAI
@@ -34,6 +34,7 @@ class Searcher:
         self.ragflow_ds_ids = ragflow_ds_ids
         self.ragflow_base = ragflow_base
         # 文档数据 (initialize() 后填充)
+        self.ready = False
         self.doc_matrix = None
         self.doc_paths = []
         self.doc_fns = []
@@ -151,8 +152,7 @@ class Searcher:
         print("加载 RAGFlow 文档...")
         chunks = self.load_docs()
         if not chunks:
-            print("无文档，退出")
-            sys.exit(1)
+            raise RuntimeError("无文档，无法初始化搜索引擎")
 
         self.doc_paths, self.doc_fns, self.doc_tags_list, doc_texts = [], [], [], []
         for c in chunks:
@@ -166,6 +166,7 @@ class Searcher:
         print(f"embedding {len(doc_texts)} 条文档 (bge-m3)...")
         self.doc_matrix = self._embed(doc_texts)
         self.doc_matrix = self._normalize(self.doc_matrix)
+        self.ready = True
         print(f"就绪，矩阵 {self.doc_matrix.shape}，耗时 {time.time() - t0:.1f}s")
 
     # ================= 分组 =================
@@ -201,6 +202,9 @@ class Searcher:
             dict: {style, keywords, vector_query, results, total, n_hit, n_semantic}
             其中 results 每项含 filename, path, tags, base_score, final_score, fn_hit, tag_hit
         """
+        if not self.ready:
+            raise RuntimeError("Searcher 未初始化，请先调用 initialize()")
+
         # 1. 翻译
         trans = self.translate(query)
         keywords = trans.get("keywords", [])
