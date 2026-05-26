@@ -2,6 +2,7 @@
 downloads/
 downloads.db
 *.html
+!rag/260519_第二版/static/*.html
 个人中心*/
 backup/
 .superpowers/
