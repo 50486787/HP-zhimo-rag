@@ -180,13 +180,19 @@ class Searcher:
 
     # ================= 分组 =================
 
+    @staticmethod
+    def _clean_group(path):
+        """去掉用于显示的 P 前缀"""
+        return path[1:] if path.startswith("P") else path
+
     def get_groups(self):
-        """返回 path 去重排序列表"""
-        return sorted(set(self.doc_paths))
+        """返回 path 去重排序列表（去掉 P 前缀）"""
+        return sorted(set(self._clean_group(p) for p in self.doc_paths))
 
     def get_group_items(self, group):
-        """返回某分组下的索引列表"""
-        return [i for i, p in enumerate(self.doc_paths) if p == group]
+        """返回某分组下的索引列表，兼容 P 前缀和无前缀"""
+        return [i for i, p in enumerate(self.doc_paths)
+                if p == group or self._clean_group(p) == group]
 
     # ================= 打分 & 搜索 =================
 
