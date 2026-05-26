@@ -173,7 +173,11 @@ a { color: inherit; text-decoration: none; }
   background: #1a1a2e;
 }
 .modal-body { padding: 16px 24px 24px; }
-.modal-fn { font-size: 1rem; font-weight: 600; color: #eee; word-break: break-all; }
+.modal-header-row {
+  display: flex; align-items: flex-start; gap: 12px;
+  flex-wrap: wrap;
+}
+.modal-fn { font-size: 1rem; font-weight: 600; color: #eee; word-break: break-all; flex: 1; }
 .modal-path { font-size: .82rem; color: #888; margin-top: 4px; }
 .modal-section { margin-top: 12px; }
 .modal-section h3 {
@@ -184,13 +188,15 @@ a { color: inherit; text-decoration: none; }
   font-size: .82rem; color: #ccc; white-space: pre-wrap; line-height: 1.6;
 }
 .download-btn {
-  display: inline-block; margin-top: 14px;
-  padding: 10px 24px; background: #e94560; color: #fff;
-  border-radius: 4px; cursor: pointer; font-size: .9rem; border: none;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 8px 16px; background: #e94560; color: #fff;
+  border-radius: 4px; cursor: pointer; font-size: .85rem; border: none;
+  text-decoration: none; white-space: nowrap; flex-shrink: 0;
   transition: background .2s;
 }
 .download-btn:hover { background: #d63850; }
-.download-btn:disabled { background: #444; color: #888; cursor: not-allowed; }
+.download-btn.disabled { background: #444; color: #888; cursor: default; pointer-events: none; }
+.dl-icon { font-size: 1.1rem; }
 
 /* ========== States ========== */
 .loading {
@@ -535,7 +541,14 @@ function openDetail(item) {
     html += '<button class="modal-close" id="modalClose">&times;</button>';
     html += '<img class="modal-img" src="' + esc(imgSrc) + '" alt="" onerror="this.style.display=\'none\'">';
     html += '<div class="modal-body">';
+    html += '<div class="modal-header-row">';
     html += '<div class="modal-fn">' + esc(detail.filename) + '</div>';
+    if (detail.zip_exists) {
+      html += '<a class="download-btn" href="/download/' + encodeURIComponent(detail.path) + '/' + encodeURIComponent(detail.filename) + '.zip"><span class="dl-icon">&#x2B07;</span> 下载 ZIP</a>';
+    } else {
+      html += '<span class="download-btn disabled"><span class="dl-icon">&#x2B07;</span> 无 ZIP</span>';
+    }
+    html += '</div>';
     html += '<div class="modal-path">路径：' + esc(detail.path) + '</div>';
 
     if (detail.tags) {
@@ -543,12 +556,6 @@ function openDetail(item) {
       html += '<h3>标签</h3>';
       html += '<div class="modal-tags">' + esc(formatTags(detail.tags)) + '</div>';
       html += '</div>';
-    }
-
-    if (detail.zip_exists) {
-      html += '<a class="download-btn" href="/download/' + encodeURIComponent(detail.path) + '/' + encodeURIComponent(detail.filename) + '.zip">下载 ZIP</a>';
-    } else {
-      html += '<button class="download-btn" disabled>无 ZIP 文件</button>';
     }
 
     html += '</div>';
