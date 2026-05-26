@@ -39,14 +39,8 @@ def _real_path(ragflow_path):
 
 
 def _safe_path(nas_base, rest_path):
-    """防路径遍历：确保 rest_path 解析后仍在 nas_base 内。
-    自动将路径中第一段 P01→01 映射。"""
-    # 把 rest_path 中第一段的 P 前缀去掉
-    parts = rest_path.replace("\\", "/").split("/")
-    if parts and parts[0].startswith("P"):
-        parts[0] = parts[0][1:]
-    mapped = "/".join(parts)
-    src = os.path.realpath(os.path.join(nas_base, mapped))
+    """防路径遍历：确保 rest_path 解析后仍在 nas_base 内。"""
+    src = os.path.realpath(os.path.join(nas_base, _real_path(rest_path)))
     nas_real = os.path.realpath(nas_base)
     if os.path.commonpath([nas_real, src]) != nas_real:
         raise HTTPException(403, "禁止访问")

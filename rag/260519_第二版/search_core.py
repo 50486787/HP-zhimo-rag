@@ -1,7 +1,7 @@
 """search_core.py - v2 景观搜图系统共享搜索模块
 从 step05_search.py 提取核心逻辑，供 CLI (step05) 和 Web (step06) 共用
 """
-import sys, json, re, time
+import json, re, time
 import numpy as np
 import requests
 from openai import OpenAI
@@ -28,7 +28,7 @@ class Searcher:
         self.translate_prompt = self._make_translate_prompt(self.vocab)
         # 初始化客户端
         self.kimi_client = OpenAI(api_key=kimi_api_key, base_url=kimi_base_url)
-        self.bge_client = OpenAI(api_key="not-needed", base_url=bge_base_url)
+        self.bge_base_url = bge_base_url
         # RAGFlow 配置
         self.ragflow_key = ragflow_key
         self.ragflow_ds_ids = ragflow_ds_ids
@@ -137,8 +137,7 @@ class Searcher:
     def _embed(self, texts, batch_size=200):
         """bge-m3 embedding，分批次避免超时（httpx 与 Xinference 代理不兼容）"""
         all_embeddings = []
-        base_url = str(self.bge_client.base_url).rstrip("/")
-        url = f"{base_url}/embeddings"
+        url = f"{self.bge_base_url.rstrip('/')}/embeddings"
         for start in range(0, len(texts), batch_size):
             batch = texts[start:start + batch_size]
             resp = requests.post(url, json={"model": "bge-m3", "input": batch}, timeout=120)
