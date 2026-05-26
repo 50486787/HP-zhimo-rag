@@ -24,7 +24,6 @@ RAGFLOW_BASE = "http://127.0.0.1:9900/api/v1"
 KIMI_KEY = "sk-g9ys55fFGKkJTsuTkEYhjC5sqEY83HfUyxRmVe1pm8QJmnN3"
 KIMI_BASE = "https://api.moonshot.cn/v1"
 BGE_BASE = "http://127.0.0.1:9997/v1"
-NAS_BASE = os.environ.get("NAS_BASE", "")
 THUMB_CACHE_DIR = os.path.join(os.path.dirname(__file__), ".thumb_cache")
 
 # ================= FastAPI 应用 =================
@@ -139,7 +138,7 @@ async def img_proxy(
     """代理 NAS 图片，自动缩略 + 缓存到 THUMB_CACHE_DIR"""
     nas = os.environ.get("NAS_BASE", "")
     if not nas:
-        raise HTTPException(500, "NAS_BASE 未配置")
+        raise HTTPException(503, "NAS_BASE 未配置")
 
     src_path = os.path.join(nas, rest_path)
     if not os.path.isfile(src_path):
@@ -183,7 +182,7 @@ async def download_zip(rest_path: str):
     """下载 ZIP 文件"""
     nas = os.environ.get("NAS_BASE", "")
     if not nas:
-        raise HTTPException(500, "NAS_BASE 未配置")
+        raise HTTPException(503, "NAS_BASE 未配置")
 
     file_path = os.path.join(nas, rest_path)
     if not os.path.isfile(file_path):
