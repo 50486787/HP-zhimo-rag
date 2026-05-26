@@ -178,7 +178,6 @@ a { color: inherit; text-decoration: none; }
   flex-wrap: wrap;
 }
 .modal-fn { font-size: 1rem; font-weight: 600; color: #eee; word-break: break-all; flex: 1; }
-.modal-path { font-size: .82rem; color: #888; margin-top: 4px; }
 .modal-section { margin-top: 12px; }
 .modal-section h3 {
   font-size: .85rem; color: #aaa; margin-bottom: 6px;
@@ -549,8 +548,6 @@ function openDetail(item) {
       html += '<span class="download-btn disabled"><span class="dl-icon">&#x2B07;</span> 无 ZIP</span>';
     }
     html += '</div>';
-    html += '<div class="modal-path">路径：' + esc(detail.path) + '</div>';
-
     if (detail.tags) {
       html += '<div class="modal-section">';
       html += '<h3>标签</h3>';
