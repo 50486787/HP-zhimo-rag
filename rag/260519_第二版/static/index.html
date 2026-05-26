@@ -1,12 +1,591 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>景观AI搜图 v2</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>景观AI搜图 v2</title>
+<style>
+/* ========== Reset & Base ========== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 16px; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: #1a1a2e;
+  color: #eee;
+  min-height: 100vh;
+}
+a { color: inherit; text-decoration: none; }
+
+/* ========== Header ========== */
+.header {
+  position: sticky; top: 0; z-index: 100;
+  background: #16213e;
+  padding: 12px 20px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.4);
+}
+.header-inner {
+  max-width: 1600px; margin: 0 auto;
+  display: flex; align-items: center; gap: 16px;
+  flex-wrap: wrap;
+}
+.logo {
+  font-size: 1.2rem; font-weight: 700; white-space: nowrap;
+  color: #e94560;
+}
+
+/* Search */
+.search-box {
+  display: flex; flex: 1; min-width: 200px; max-width: 480px;
+}
+.search-box input {
+  flex: 1; padding: 8px 14px;
+  border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px;
+  background: #1a1a2e; color: #eee; font-size: .95rem;
+  outline: none; transition: border-color .2s;
+}
+.search-box input:focus { border-color: #e94560; }
+.search-box button {
+  padding: 8px 18px;
+  background: #e94560; color: #fff; border: none; border-radius: 0 4px 4px 0;
+  cursor: pointer; font-size: .95rem; transition: background .2s;
+}
+.search-box button:hover { background: #d63850; }
+
+/* Status bar */
+.status-bar {
+  display: flex; align-items: center; gap: 12px;
+  font-size: .82rem; color: #aaa; margin-left: auto;
+}
+.status-bar .count { color: #e94560; font-weight: 600; }
+
+/* ========== Group Tabs ========== */
+.tabs-wrap {
+  background: #16213e;
+  border-bottom: 1px solid #333;
+  padding: 0 20px;
+  overflow-x: auto; white-space: nowrap;
+}
+.tabs {
+  display: inline-flex; gap: 0;
+  max-width: 1600px;
+}
+.tab {
+  display: inline-block; padding: 10px 18px;
+  cursor: pointer; border-bottom: 2px solid transparent;
+  color: #aaa; font-size: .9rem;
+  transition: color .2s, border-color .2s;
+  user-select: none;
+}
+.tab:hover { color: #eee; }
+.tab.active { color: #e94560; border-bottom-color: #e94560; }
+
+/* ========== Search Info ========== */
+.search-info {
+  max-width: 1600px; margin: 0 auto; padding: 12px 20px 0;
+}
+.search-info .keywords {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: .85rem; color: #aaa;
+}
+.search-info .kw-tag {
+  display: inline-block; padding: 2px 10px;
+  background: #e94560; color: #fff; border-radius: 10px; font-size: .8rem;
+}
+.legend { font-size: .78rem; color: #888; margin-top: 4px; }
+.legend .hit-fn { color: #e94560; }
+.legend .hit-tag { color: #e9a445; }
+
+/* ========== Gallery ========== */
+.gallery {
+  max-width: 1600px; margin: 0 auto; padding: 16px 20px;
+  columns: 5 220px; column-gap: 12px;
+}
+.card {
+  break-inside: avoid; margin-bottom: 12px;
+  background: #16213e; border-radius: 6px;
+  overflow: hidden; cursor: pointer;
+  transition: transform .15s, box-shadow .15s;
+}
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(233,69,96,.25);
+}
+.card-img {
+  width: 100%; display: block; background: #1a1a2e;
+  min-height: 120px;
+}
+.card-body { padding: 8px 10px 10px; }
+.card-fn {
+  font-size: .8rem; color: #ccc; line-height: 1.4;
+  word-break: break-all;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.card-style {
+  display: inline-block; margin-top: 5px;
+  padding: 1px 8px; background: #2a3a5e; border-radius: 8px;
+  font-size: .72rem; color: #99b;
+}
+/* Hit markers */
+.card.hit-fn .card-fn { color: #e94560; }
+.card.hit-tag .card-style { background: #e9a445; color: #1a1a2e; }
+.hit-badge {
+  display: inline-block; padding: 1px 7px; border-radius: 8px;
+  font-size: .68rem; font-weight: 600;
+  margin-top: 4px;
+}
+.hit-badge.fn { background: #e94560; color: #fff; }
+.hit-badge.tag { background: #e9a445; color: #1a1a2e; }
+
+/* ========== Modal ========== */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,.75);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.modal-overlay.hidden { display: none; }
+.modal {
+  background: #16213e; border-radius: 8px;
+  max-width: 960px; width: 100%; max-height: 90vh;
+  overflow-y: auto; box-shadow: 0 8px 40px rgba(0,0,0,.5);
+  position: relative;
+}
+.modal-close {
+  position: sticky; top: 8px; float: right; z-index: 10;
+  width: 36px; height: 36px; margin: 8px 12px 0 0;
+  border: none; border-radius: 50%; background: rgba(0,0,0,.5);
+  color: #eee; font-size: 1.2rem; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .2s;
+}
+.modal-close:hover { background: #e94560; }
+.modal-img {
+  width: 100%; display: block; border-radius: 8px 8px 0 0;
+  background: #1a1a2e;
+}
+.modal-body { padding: 16px 24px 24px; }
+.modal-fn { font-size: 1rem; font-weight: 600; color: #eee; word-break: break-all; }
+.modal-path { font-size: .82rem; color: #888; margin-top: 4px; }
+.modal-section { margin-top: 12px; }
+.modal-section h3 {
+  font-size: .85rem; color: #aaa; margin-bottom: 6px;
+  border-bottom: 1px solid #2a3a5e; padding-bottom: 4px;
+}
+.modal-tags {
+  font-size: .82rem; color: #ccc; white-space: pre-wrap; line-height: 1.6;
+}
+.download-btn {
+  display: inline-block; margin-top: 14px;
+  padding: 10px 24px; background: #e94560; color: #fff;
+  border-radius: 4px; cursor: pointer; font-size: .9rem; border: none;
+  transition: background .2s;
+}
+.download-btn:hover { background: #d63850; }
+.download-btn:disabled { background: #444; color: #888; cursor: not-allowed; }
+
+/* ========== States ========== */
+.loading {
+  text-align: center; padding: 60px 20px; color: #888; font-size: 1rem;
+}
+.error {
+  text-align: center; padding: 40px 20px; color: #e94560; font-size: .95rem;
+}
+.spinner {
+  display: inline-block; width: 24px; height: 24px;
+  border: 3px solid #333; border-top-color: #e94560;
+  border-radius: 50%; animation: spin .7s linear infinite;
+  vertical-align: middle; margin-right: 8px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ========== Responsive ========== */
+@media (max-width: 1200px) { .gallery { columns: 4 200px; } }
+@media (max-width: 992px)  { .gallery { columns: 3 180px; } }
+@media (max-width: 768px) {
+  .gallery { columns: 2 160px; padding: 10px 12px; }
+  .header-inner { gap: 8px; }
+  .search-box { order: 3; flex-basis: 100%; max-width: none; }
+  .status-bar { margin-left: 0; }
+  .tabs-wrap { padding: 0 8px; }
+  .tab { padding: 8px 12px; font-size: .82rem; }
+  .modal { max-height: 95vh; border-radius: 0; }
+  .modal-body { padding: 12px 16px 16px; }
+}
+@media (max-width: 480px) {
+  .gallery { columns: 2 140px; column-gap: 8px; padding: 8px; }
+  .card { margin-bottom: 8px; }
+}
+</style>
 </head>
 <body>
-    <h1>景观AI搜图 v2</h1>
-    <p>前端由任务3创建。本文件为占位页。</p>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-inner">
+    <span class="logo">景观AI搜图 v2</span>
+    <div class="search-box">
+      <input type="text" id="searchInput" placeholder="输入关键词搜索，如：中式庭院、儿童滑梯…" autofocus>
+      <button id="searchBtn">搜索</button>
+    </div>
+    <div class="status-bar" id="statusBar">
+      <span id="modeLabel">浏览</span>
+      <span class="count" id="itemCount"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Group Tabs -->
+<div class="tabs-wrap" id="tabsWrap">
+  <div class="tabs" id="tabsContainer"></div>
+</div>
+
+<!-- Search Info -->
+<div class="search-info hidden" id="searchInfo"></div>
+
+<!-- Gallery -->
+<div class="gallery" id="gallery"></div>
+
+<!-- Loading / Error / Empty states -->
+<div id="galleryState" class="loading"><span class="spinner"></span>加载中…</div>
+
+<!-- Modal -->
+<div class="modal-overlay hidden" id="modalOverlay">
+  <div class="modal" id="modalContent"></div>
+</div>
+
+<script>
+// ====================== HELPERS ======================
+
+/** Escape HTML to prevent XSS */
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Extract style from tags string: "风格:xxx" -> "xxx" */
+function extractStyle(tags) {
+  var m = tags.match(/风格:(\S+)/);
+  return m ? m[1] : '';
+}
+
+/** Format tags for modal display (pre-wrap friendly) */
+function formatTags(tags) {
+  return tags.replace(/\s*\|\s*/g, '\n');
+}
+
+// ====================== STATE ======================
+
+var state = {
+  groups: [],          // all group names
+  activeGroup: null,   // currently selected group
+  mode: 'browse',      // 'browse' | 'search'
+  searchResults: null, // full search response (null when browsing)
+};
+
+// ====================== API ======================
+
+var API = {
+  getGroups: function() {
+    return fetch('/api/groups').then(function(r) {
+      if (!r.ok) throw new Error('获取分组失败: ' + r.status);
+      return r.json();
+    });
+  },
+  getBrowse: function(group, pageSize) {
+    pageSize = pageSize || 200;
+    return fetch('/api/browse?group=' + encodeURIComponent(group) + '&page_size=' + pageSize).then(function(r) {
+      if (!r.ok) throw new Error('加载失败: ' + r.status);
+      return r.json();
+    });
+  },
+  search: function(q) {
+    return fetch('/api/search?q=' + encodeURIComponent(q)).then(function(r) {
+      if (!r.ok) throw new Error('搜索失败: ' + r.status);
+      return r.json();
+    });
+  },
+  getDetail: function(path, filename) {
+    return fetch('/api/detail?path=' + encodeURIComponent(path) + '&filename=' + encodeURIComponent(filename)).then(function(r) {
+      if (!r.ok) throw new Error('获取详情失败: ' + r.status);
+      return r.json();
+    });
+  }
+};
+
+// ====================== RENDER ======================
+
+/** Render group tabs */
+function renderTabs() {
+  var container = document.getElementById('tabsContainer');
+  container.innerHTML = '';
+  state.groups.forEach(function(g) {
+    var tab = document.createElement('span');
+    tab.className = 'tab' + (g === state.activeGroup ? ' active' : '');
+    tab.textContent = g;
+    tab.addEventListener('click', function() { selectGroup(g); });
+    container.appendChild(tab);
+  });
+  document.getElementById('tabsWrap').style.display = state.groups.length ? '' : 'none';
+}
+
+/** Render a single card */
+function renderCard(item, hitInfo) {
+  var card = document.createElement('div');
+  card.className = 'card';
+
+  // hit classes
+  if (hitInfo) {
+    if (hitInfo.fn_hit) card.classList.add('hit-fn');
+    if (hitInfo.tag_hit) card.classList.add('hit-tag');
+  }
+
+  var style = extractStyle(item.tags);
+  var imgSrc = '/img/' + encodeURIComponent(item.path) + '/' + encodeURIComponent(item.filename) + '.jpg?w=400';
+
+  var html = '';
+  html += '<img class="card-img" src="' + esc(imgSrc) + '" loading="lazy" alt="" onerror="this.src=\'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22300%22 height=%22200%22><rect fill=%22%231a1a2e%22 width=%22300%22 height=%22200%22/><text fill=%22%23555%22 x=%22150%22 y=%22105%22 text-anchor=%22middle%22 font-size=%2214%22>无预览</text></svg>\'">';
+  html += '<div class="card-body">';
+  html += '<div class="card-fn">' + esc(item.filename) + '</div>';
+  if (style) {
+    html += '<span class="card-style">' + esc(style) + '</span>';
+  }
+  // hit badges
+  if (hitInfo) {
+    if (hitInfo.fn_hit) html += ' <span class="hit-badge fn">[文件名]</span>';
+    if (hitInfo.tag_hit) html += ' <span class="hit-badge tag">[标签]</span>';
+  }
+  html += '</div>';
+  card.innerHTML = html;
+
+  card.addEventListener('click', function() { openDetail(item); });
+  return card;
+}
+
+/** Render the gallery */
+function renderGallery(items, hitMap) {
+  var gallery = document.getElementById('gallery');
+  gallery.innerHTML = '';
+
+  if (!items || items.length === 0) {
+    showState('empty');
+    return;
+  }
+  hideState();
+
+  items.forEach(function(item) {
+    var hitInfo = hitMap ? hitMap.get(item.filename + '|' + item.path) : null;
+    gallery.appendChild(renderCard(item, hitInfo));
+  });
+}
+
+/** Build a hit map from search results for fast lookup */
+function buildHitMap(searchData) {
+  var map = new Map();
+  if (!searchData || !searchData.results) return map;
+  searchData.results.forEach(function(r) {
+    map.set(r.filename + '|' + r.path, { fn_hit: r.fn_hit, tag_hit: r.tag_hit });
+  });
+  return map;
+}
+
+/** Render search info bar */
+function renderSearchInfo() {
+  var div = document.getElementById('searchInfo');
+  if (state.mode !== 'search' || !state.searchResults) {
+    div.classList.add('hidden');
+    return;
+  }
+  div.classList.remove('hidden');
+  var d = state.searchResults;
+  var html = '<div class="keywords">';
+  html += '<span>关键词：</span>';
+  (d.keywords || []).forEach(function(kw) {
+    html += '<span class="kw-tag">' + esc(kw) + '</span>';
+  });
+  if (d.style) {
+    html += '<span style="color:#99b">风格：' + esc(d.style) + '</span>';
+  }
+  html += '</div>';
+  html += '<div class="legend">';
+  html += '命中 <span class="hit-fn">[文件名]</span> 红色 ';
+  html += '<span class="hit-tag">[标签]</span> 橙色 ';
+  html += '| 共 ' + d.total + ' 条（语义匹配' + (d.n_semantic || 0) + '条）';
+  html += '</div>';
+  div.innerHTML = html;
+}
+
+/** Update status bar */
+function updateStatus(count, mode) {
+  document.getElementById('modeLabel').textContent = mode === 'search' ? '搜索结果' : '浏览';
+  document.getElementById('itemCount').textContent = count != null ? count + ' 条' : '';
+}
+
+/** State display helpers */
+function showState(type, msg) {
+  var el = document.getElementById('galleryState');
+  el.style.display = '';
+  if (type === 'loading') {
+    el.className = 'loading';
+    el.innerHTML = '<span class="spinner"></span>加载中…';
+  } else if (type === 'error') {
+    el.className = 'error';
+    el.textContent = msg || '加载失败';
+  } else if (type === 'empty') {
+    el.className = 'loading';
+    el.innerHTML = '暂无结果';
+  }
+}
+
+function hideState() {
+  document.getElementById('galleryState').style.display = 'none';
+}
+
+// ====================== ACTIONS ======================
+
+/** Select a group and load its items */
+function selectGroup(group) {
+  state.activeGroup = group;
+  state.mode = 'browse';
+  state.searchResults = null;
+  document.getElementById('searchInput').value = '';
+  document.getElementById('searchInfo').classList.add('hidden');
+
+  renderTabs();
+  showState('loading');
+
+  API.getBrowse(group, 200).then(function(data) {
+    renderGallery(data.items, null);
+    updateStatus(data.total, 'browse');
+  }).catch(function(err) {
+    showState('error', err.message);
+    updateStatus(null, 'browse');
+  });
+}
+
+/** Execute search */
+function doSearch(q) {
+  if (!q.trim()) {
+    // empty query: go back to browse mode
+    if (state.activeGroup) {
+      selectGroup(state.activeGroup);
+    }
+    return;
+  }
+
+  state.mode = 'search';
+  state.activeGroup = null;
+  showState('loading');
+  renderTabs();
+
+  API.search(q.trim()).then(function(data) {
+    state.searchResults = data;
+    var hitMap = buildHitMap(data);
+    renderGallery(data.results, hitMap);
+    renderSearchInfo();
+    updateStatus(data.total, 'search');
+  }).catch(function(err) {
+    showState('error', err.message);
+    updateStatus(null, 'search');
+  });
+}
+
+/** Open detail modal */
+function openDetail(item) {
+  var overlay = document.getElementById('modalOverlay');
+  var content = document.getElementById('modalContent');
+
+  // show loading
+  content.innerHTML = '<div class="loading" style="padding:40px"><span class="spinner"></span>加载详情…</div>';
+  overlay.classList.remove('hidden');
+
+  API.getDetail(item.path, item.filename).then(function(detail) {
+    var style = extractStyle(detail.tags);
+    var imgSrc = '/img/' + encodeURIComponent(detail.path) + '/' + encodeURIComponent(detail.filename) + '.jpg?w=800';
+
+    var html = '';
+    html += '<button class="modal-close" id="modalClose">&times;</button>';
+    html += '<img class="modal-img" src="' + esc(imgSrc) + '" alt="" onerror="this.style.display=\'none\'">';
+    html += '<div class="modal-body">';
+    html += '<div class="modal-fn">' + esc(detail.filename) + '</div>';
+    html += '<div class="modal-path">路径：' + esc(detail.path) + '</div>';
+
+    if (detail.tags) {
+      html += '<div class="modal-section">';
+      html += '<h3>标签</h3>';
+      html += '<div class="modal-tags">' + esc(formatTags(detail.tags)) + '</div>';
+      html += '</div>';
+    }
+
+    if (detail.zip_exists) {
+      html += '<a class="download-btn" href="/download/' + encodeURIComponent(detail.path) + '/' + encodeURIComponent(detail.filename) + '.zip">下载 ZIP</a>';
+    } else {
+      html += '<button class="download-btn" disabled>无 ZIP 文件</button>';
+    }
+
+    html += '</div>';
+    content.innerHTML = html;
+
+    // bind close button
+    document.getElementById('modalClose').addEventListener('click', closeModal);
+  }).catch(function(err) {
+    content.innerHTML = '<div class="error" style="padding:40px">' + esc(err.message) + '</div>';
+  });
+}
+
+/** Close the modal */
+function closeModal() {
+  document.getElementById('modalOverlay').classList.add('hidden');
+}
+
+// ====================== INIT ======================
+
+function init() {
+  // Bind search
+  var searchInput = document.getElementById('searchInput');
+  document.getElementById('searchBtn').addEventListener('click', function() {
+    doSearch(searchInput.value);
+  });
+  searchInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      doSearch(searchInput.value);
+    }
+  });
+
+  // Bind modal overlay click to close
+  document.getElementById('modalOverlay').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+  });
+
+  // Bind Escape key to close modal
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+  });
+
+  // Load groups
+  showState('loading');
+  API.getGroups().then(function(data) {
+    state.groups = data.groups || [];
+    if (state.groups.length > 0) {
+      // Select the last (newest) group by default
+      selectGroup(state.groups[state.groups.length - 1]);
+    } else {
+      showState('empty');
+      updateStatus(0, 'browse');
+    }
+    renderTabs();
+  }).catch(function(err) {
+    showState('error', err.message);
+    updateStatus(null, 'browse');
+  });
+}
+
+init();
+</script>
 </body>
 </html>
