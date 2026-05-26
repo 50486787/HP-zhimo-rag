@@ -134,9 +134,18 @@ class Searcher:
 
     # ================= Embedding =================
 
-    def _embed(self, texts):
-        resp = self.bge_client.embeddings.create(model="bge-m3", input=texts)
-        return np.array([d.embedding for d in resp.data], dtype=np.float32)
+    def _embed(self, texts, batch_size=200):
+        """bge-m3 embedding，分批次避免超时（httpx 与 Xinference 代理不兼容）"""
+        all_embeddings = []
+        base_url = str(self.bge_client.base_url).rstrip("/")
+        url = f"{base_url}/embeddings"
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start:start + batch_size]
+            resp = requests.post(url, json={"model": "bge-m3", "input": batch}, timeout=120)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Embedding 失败: {resp.status_code} {resp.text[:200]}")
+            all_embeddings.extend(d["embedding"] for d in resp.json()["data"])
+        return np.array(all_embeddings, dtype=np.float32)
 
     @staticmethod
     def _normalize(vecs):
