@@ -270,6 +270,7 @@ function esc(s) {
 
 /** Extract style from tags string: "风格:xxx" -> "xxx" */
 function extractStyle(tags) {
+  if (!tags) return '';
   var m = tags.match(/风格:(\S+)/);
   return m ? m[1] : '';
 }
@@ -286,6 +287,7 @@ var state = {
   activeGroup: null,   // currently selected group
   mode: 'browse',      // 'browse' | 'search'
   searchResults: null, // full search response (null when browsing)
+  requestId: 0,        // incrementing counter to prevent stale responses
 };
 
 // ====================== API ======================
@@ -459,10 +461,13 @@ function selectGroup(group) {
   renderTabs();
   showState('loading');
 
+  var rid = ++state.requestId;
   API.getBrowse(group, 200).then(function(data) {
+    if (rid !== state.requestId) return; // stale response
     renderGallery(data.items, null);
     updateStatus(data.total, 'browse');
   }).catch(function(err) {
+    if (rid !== state.requestId) return;
     showState('error', err.message);
     updateStatus(null, 'browse');
   });
@@ -483,13 +488,16 @@ function doSearch(q) {
   showState('loading');
   renderTabs();
 
+  var rid = ++state.requestId;
   API.search(q.trim()).then(function(data) {
+    if (rid !== state.requestId) return; // stale response
     state.searchResults = data;
     var hitMap = buildHitMap(data);
     renderGallery(data.results, hitMap);
     renderSearchInfo();
     updateStatus(data.total, 'search');
   }).catch(function(err) {
+    if (rid !== state.requestId) return;
     showState('error', err.message);
     updateStatus(null, 'search');
   });
