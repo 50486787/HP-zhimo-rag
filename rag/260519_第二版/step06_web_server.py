@@ -33,6 +33,15 @@ app = FastAPI(title="景观AI搜图 v2")
 _searcher = None
 
 
+def _safe_path(nas_base, rest_path):
+    """防路径遍历：确保 rest_path 解析后仍在 nas_base 内"""
+    src = os.path.realpath(os.path.join(nas_base, rest_path))
+    nas_real = os.path.realpath(nas_base)
+    if os.path.commonpath([nas_real, src]) != nas_real:
+        raise HTTPException(403, "禁止访问")
+    return src
+
+
 def _ensure_ready():
     """确保 searcher 已初始化，否则抛 503"""
     if _searcher is None or not _searcher.ready:
@@ -50,7 +59,8 @@ async def index():
     """返回前端首页"""
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.isfile(index_path):
-        return HTMLResponse(open(index_path, encoding="utf-8").read())
+        with open(index_path, encoding="utf-8") as f:
+            return HTMLResponse(f.read())
     raise HTTPException(404, "前端尚未部署")
 
 
@@ -113,7 +123,7 @@ async def api_detail(
             break
 
     if match_idx is None:
-        raise HTTPException(404, f"未找到文档: {path}/{filename}")
+        raise HTTPException(404, "未找到文档")
 
     nas = os.environ.get("NAS_BASE", "")
     jpg_path = os.path.join(nas, path, f"{filename}.jpg")
@@ -140,9 +150,9 @@ async def img_proxy(
     if not nas:
         raise HTTPException(503, "NAS_BASE 未配置")
 
-    src_path = os.path.join(nas, rest_path)
+    src_path = _safe_path(nas, rest_path)
     if not os.path.isfile(src_path):
-        raise HTTPException(404, f"图片不存在: {rest_path}")
+        raise HTTPException(404, "图片不存在")
 
     # 缓存文件名: 路径中的分隔符替换为 _，避免子目录
     safe_name = rest_path.replace("\\", "_").replace("/", "_")
@@ -153,7 +163,7 @@ async def img_proxy(
     if os.path.isfile(cache_path):
         return FileResponse(cache_path, media_type="image/jpeg")
 
-    # 生成缩略图
+    # 生成缩略图（原子写入防止并发损坏）
     try:
         os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
         img = Image.open(src_path)
@@ -166,13 +176,16 @@ async def img_proxy(
             new_h = int(orig_h * ratio)
             img = img.resize((w, new_h), Image.LANCZOS)
 
-        # 保存到缓存
-        img.save(cache_path, "JPEG", quality=80)
+        # 先写临时文件再原子重命名
+        cache_tmp = cache_path + ".tmp"
+        img.save(cache_tmp, "JPEG", quality=80)
+        os.replace(cache_tmp, cache_path)
 
-        # 返回缓存的缩略图
         return FileResponse(cache_path, media_type="image/jpeg")
-    except Exception as e:
-        raise HTTPException(500, f"图片处理失败: {e}")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(500, "图片处理失败")
 
 
 # ================= 路由: 下载 =================
@@ -184,9 +197,9 @@ async def download_zip(rest_path: str):
     if not nas:
         raise HTTPException(503, "NAS_BASE 未配置")
 
-    file_path = os.path.join(nas, rest_path)
+    file_path = _safe_path(nas, rest_path)
     if not os.path.isfile(file_path):
-        raise HTTPException(404, f"文件不存在: {rest_path}")
+        raise HTTPException(404, "文件不存在")
 
     return FileResponse(file_path, media_type="application/zip", filename=os.path.basename(rest_path))
 
