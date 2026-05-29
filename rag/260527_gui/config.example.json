@@ -1,0 +1,42 @@
+{
+  "vision_model": {
+    "api_key": "",
+    "base_url": "https://api.moonshot.cn/v1",
+    "model": "kimi-k2.5",
+    "temperature": 0.6,
+    "thinking": false
+  },
+  "text_model": {
+    "api_key": "",
+    "base_url": "https://api.moonshot.cn/v1",
+    "model": "kimi-k2.5",
+    "temperature": 0.6,
+    "thinking": false
+  },
+  "ragflow": {
+    "api_key": "",
+    "base_url": "http://127.0.0.1:9900/api/v1",
+    "dataset_ids": []
+  },
+  "bge": {
+    "base_url": "http://127.0.0.1:9997/v1",
+    "model": "bge-m3"
+  },
+  "paths": {
+    "nas_base": "",
+    "step3_vocab": ""
+  },
+  "web": {
+    "port": 8088
+  },
+  "prompts": {
+    "step1_blind": "# Role\n你是景观建筑设计院的 3D 资产标注专家。\n\n# 任务\n根据模型预览图和文件名，为 SU 模型打上一组标签和一段自然语言描述。\n\n# 规则\n- 参考文件名中的描述信息\n- 标签用逗号分隔，自由发挥，你觉得有检索价值的词都写上\n- 描述 50-80 字，综合概括模型特征\n- 禁止标注水印内容\n- 禁止标注文件名末尾的 ID_数字\n\n# 输出格式\n严格只输出 JSON，不要额外文字：\n{\n  \"tags\": \"词1, 词2, 词3, ...\",\n  \"description\": \"50-80字综合描述\"\n}",
+    "step2_merge": "# Role\n你是景观建筑设计院的 3D 资产标注专家，正在整理 SU 模型的标签词表。\n\n# 任务\n下面的标签需要做层级归并：把过于具体的下层标签，用更通用的上层范畴词来替代。\n\n# 归并原则\n- 层级方向：具体词 → 范畴词（如\"蕨类\"→\"蕨类植物\"，\"望柱\"→\"栏杆柱\"）\n- 只在同一语义维度内归并，跨维度不合并\n- 如果原词本身已经是合适的层级，不需要归并，就不要列出来\n- 拿不准的宁可不合并\n\n# 输出格式\n严格只输出 JSON，key 是原始词，value 是归并后的上层词：\n{\n  \"蕨类\": \"蕨类植物\",\n  \"望柱\": \"栏杆柱\"\n}",
+    "step3_refined": "# Role\n你是顶级的景观建筑 3D 资产标注专家。\n\n# Core Rules\n- 文件名优先：先解析文件名中的下划线分词\n- 预览图中的水印内容绝对不标注\n- 看不清或不存在的元素，宁可留空\n- 禁止主观评价词，禁止描述末尾添加总结句\n\n## 维度\nstyle: 现代/新中式/中式/轻奢/极简/古风/意式/欧式/日式/热带度假风/禅意/赛博朋克/宋式/田园/卡通风/工业风\ntags: 构筑元素数组\nplants: 植物类型数组\nmaterial: 材质数组\nform: 造型特征(通常留空)\n\n## 受控词表\n{word_list_str}\n\n# 输出格式\n严格只输出JSON：{\"style\":\"\",\"tags\":[],\"plants\":[],\"material\":[],\"form\":\"\",\"description\":\"\"}"
+  },
+  "xinference": {
+    "command": "xinference-local",
+    "host": "127.0.0.1",
+    "port": "9997"
+  }
+}

@@ -1,0 +1,7 @@
+cryptography
+fastapi
+numpy
+openai
+Pillow
+requests
+uvicorn

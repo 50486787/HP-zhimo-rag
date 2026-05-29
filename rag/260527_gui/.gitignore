@@ -1,0 +1,16 @@
+.venv/
+.cert/
+.thumb_cache/
+__pycache__/
+*.pyc
+运行日志.log
+config.json
+*.pem
+*目录骨架*.json
+粗标输出/
+精标输出/
+gui测试/
+.embed_cache/
+*目录骨架*.json
+ragflow_入库_*.csv
+规范词频_Top500/
